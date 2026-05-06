@@ -54,7 +54,11 @@ fn create_keyboard_with_morse_output_combo() -> Keyboard<'static> {
         },
         combo: CombosConfig {
             combos: [
-                Some(Combo::new(ComboConfig::new([combo_key, combo_key_2], combo_output, None))),
+                Some(Combo::new(ComboConfig::new(
+                    [combo_key, combo_key_2],
+                    combo_output,
+                    None,
+                ))),
                 None,
                 None,
                 None,

@@ -1,8 +1,21 @@
+//! Lighting subsystem.
+//!
+//! Two unrelated pieces under one roof:
+//!
+//! * [`UsbLedReader`] — reads the host's HID LED indicator output report
+//!   (caps lock / num lock / scroll lock state) so other parts of the
+//!   firmware can react to it. Always present.
+//! * [`rgb`] — per-key RGB lighting (traits, processor, drivers).
+//!   Behind the `rgb_lighting` feature.
+
 use embassy_usb::class::hid::HidReader;
 use embassy_usb::driver::Driver;
 use rmk_types::led_indicator::LedIndicator;
 
 use crate::hid::{HidError, HidReaderTrait};
+
+#[cfg(feature = "rgb_lighting")]
+pub mod rgb;
 
 pub(crate) struct UsbLedReader<'a, 'd, D: Driver<'d>> {
     hid_reader: &'a mut HidReader<'d, D, 1>,

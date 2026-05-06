@@ -27,7 +27,9 @@ use super::input_device::encoder::expand_encoder_device;
 use super::input_device::iqs5xx::{expand_iqs5xx_device, expand_mouse_button_routing};
 use super::keyboard_config::{expand_keyboard_info, expand_vial_config, read_keyboard_toml_config};
 use super::layout::expand_default_keymap;
-use super::matrix::{expand_bootmagic_check, expand_matrix_config, expand_matrix_input_output_pins};
+use super::matrix::{
+    expand_bootmagic_check, expand_matrix_config, expand_matrix_input_output_pins,
+};
 use super::split::central::{expand_serial_init, expand_split_central_config};
 
 /// Parsed input to `central_init!(p, Irqs, rmk_config, flash)`.
@@ -78,20 +80,32 @@ pub(crate) fn expand_central_setup(_input: TokenStream2) -> TokenStream2 {
     let keyboard_config = read_keyboard_toml_config();
     let identity = match keyboard_config.identity() {
         Ok(i) => i,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("identity: {e}")).to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("identity: {e}"))
+                .to_compile_error();
+        }
     };
     let host = keyboard_config.host();
     let hardware = match keyboard_config.hardware() {
         Ok(h) => h,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("hardware: {e}")).to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("hardware: {e}"))
+                .to_compile_error();
+        }
     };
     let behavior = match keyboard_config.behavior() {
         Ok(b) => b,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("behavior: {e}")).to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("behavior: {e}"))
+                .to_compile_error();
+        }
     };
     let layout = match keyboard_config.layout() {
         Ok(l) => l,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("layout: {e}")).to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("layout: {e}"))
+                .to_compile_error();
+        }
     };
 
     let keyboard_info = expand_keyboard_info(&identity, &layout);
@@ -111,6 +125,57 @@ pub(crate) fn expand_central_setup(_input: TokenStream2) -> TokenStream2 {
     }
 }
 
+/// Module-level emission for `rmk::macros::keymap_setup!()`. Emits
+/// only the matrix-shape consts and `get_default_keymap` /
+/// `get_default_encoder_map` functions — see the public macro doc on
+/// `lib.rs::keymap_setup`.
+pub(crate) fn expand_keymap_setup(_input: TokenStream2) -> TokenStream2 {
+    let keyboard_config = read_keyboard_toml_config();
+    let identity = match keyboard_config.identity() {
+        Ok(i) => i,
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("identity: {e}"))
+                .to_compile_error();
+        }
+    };
+    let behavior = match keyboard_config.behavior() {
+        Ok(b) => b,
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("behavior: {e}"))
+                .to_compile_error();
+        }
+    };
+    let layout = match keyboard_config.layout() {
+        Ok(l) => l,
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("layout: {e}"))
+                .to_compile_error();
+        }
+    };
+
+    // expand_keyboard_info emits ROW/COL/NUM_LAYER/NUM_ENCODER + a
+    // KEYBOARD_DEVICE_CONFIG. The shape consts are required by
+    // get_default_keymap's return type. KEYBOARD_DEVICE_CONFIG is
+    // harmless to include — it's a const, no runtime cost — but we
+    // don't really want it in shared modules. Slice it out by
+    // re-emitting just the shape consts directly.
+    let _ = identity; // identity is used to gate behavior in some paths; not needed here.
+    let num_col = layout.cols as usize;
+    let num_row = layout.rows as usize;
+    let num_layer = layout.layers as usize;
+    let total_num_encoder: usize = layout.encoder_counts.iter().sum();
+
+    let default_keymap = expand_default_keymap(&layout, &behavior);
+
+    quote! {
+        pub const COL: usize = #num_col;
+        pub const ROW: usize = #num_row;
+        pub const NUM_LAYER: usize = #num_layer;
+        pub const NUM_ENCODER: usize = #total_num_encoder;
+        #default_keymap
+    }
+}
+
 pub(crate) fn expand_central_init(input: TokenStream2) -> TokenStream2 {
     let args = match syn::parse2::<CentralInitArgs>(input) {
         Ok(a) => a,
@@ -120,18 +185,33 @@ pub(crate) fn expand_central_init(input: TokenStream2) -> TokenStream2 {
     let keyboard_config = read_keyboard_toml_config();
     let hardware = match keyboard_config.hardware() {
         Ok(h) => h,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("hardware config: {e}"))
-            .to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("hardware config: {e}"),
+            )
+            .to_compile_error();
+        }
     };
     let behavior = match keyboard_config.behavior() {
         Ok(b) => b,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("behavior config: {e}"))
-            .to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("behavior config: {e}"),
+            )
+            .to_compile_error();
+        }
     };
     let layout = match keyboard_config.layout() {
         Ok(l) => l,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("layout config: {e}"))
-            .to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("layout config: {e}"),
+            )
+            .to_compile_error();
+        }
     };
 
     if hardware.chip.series != ChipSeries::Rp2040 {
@@ -234,7 +314,10 @@ pub(crate) fn expand_central_init(input: TokenStream2) -> TokenStream2 {
     let central_encoder_configs = central_input_devices.encoder.clone().unwrap_or_default();
     let (encoder_initializers, _encoder_processor_initializers) =
         expand_encoder_device(0, central_encoder_configs, &hardware.chip);
-    let encoder_inits: Vec<_> = encoder_initializers.iter().map(|i| &i.initializer).collect();
+    let encoder_inits: Vec<_> = encoder_initializers
+        .iter()
+        .map(|i| &i.initializer)
+        .collect();
     let encoder_var_names: Vec<_> = encoder_initializers.iter().map(|i| &i.var_name).collect();
 
     // Display: `[split.central.display]` builds a `display_processor` if
@@ -519,7 +602,10 @@ pub(crate) fn expand_peripheral_init(input: TokenStream2) -> TokenStream2 {
     let keyboard_config = read_keyboard_toml_config();
     let hardware = match keyboard_config.hardware() {
         Ok(h) => h,
-        Err(e) => return syn::Error::new(proc_macro2::Span::call_site(), format!("hardware: {e}")).to_compile_error(),
+        Err(e) => {
+            return syn::Error::new(proc_macro2::Span::call_site(), format!("hardware: {e}"))
+                .to_compile_error();
+        }
     };
 
     if hardware.chip.series != ChipSeries::Rp2040 {

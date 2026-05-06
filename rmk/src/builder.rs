@@ -79,9 +79,13 @@ pub struct NoKeymap;
 /// Storage slot, populated by [`Rmk::with_storage`]. Owns the storage by
 /// value (`Storage<F, …>` has no lifetime parameter).
 #[cfg(feature = "storage")]
-pub struct StorageHeld<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>(
-    pub(crate) Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>,
-);
+pub struct StorageHeld<
+    F: AsyncNorFlash,
+    const ROW: usize,
+    const COL: usize,
+    const NUM_LAYER: usize,
+    const NUM_ENCODER: usize,
+>(pub(crate) Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>);
 
 /// "Storage slot is empty" marker.
 pub struct NoStorage;
@@ -100,13 +104,7 @@ pub struct NoMatrix;
 /// receiver. `.run()` invokes [`crate::split::central::run_peripheral_manager`]
 /// internally so the user doesn't need to spell out its turbofish.
 #[cfg(all(feature = "split", not(feature = "_ble")))]
-pub struct SplitCentralUart<
-    R,
-    const ROW: usize,
-    const COL: usize,
-    const ROW_OFFSET: usize,
-    const COL_OFFSET: usize,
-> {
+pub struct SplitCentralUart<R, const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFSET: usize> {
     pub(crate) id: usize,
     pub(crate) receiver: R,
 }
@@ -134,17 +132,14 @@ impl SplitCentralUartSlot for NoSplitCentralUart {
 }
 
 #[cfg(all(feature = "split", not(feature = "_ble")))]
-impl<R, const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFSET: usize>
-    SplitCentralUartSlot for SplitCentralUart<R, ROW, COL, ROW_OFFSET, COL_OFFSET>
+impl<R, const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFSET: usize> SplitCentralUartSlot
+    for SplitCentralUart<R, ROW, COL, ROW_OFFSET, COL_OFFSET>
 where
     R: embedded_io_async::Read + embedded_io_async::Write,
 {
     async fn run_peripheral_manager(self) {
-        crate::split::central::run_peripheral_manager::<ROW, COL, ROW_OFFSET, COL_OFFSET, _>(
-            self.id,
-            self.receiver,
-        )
-        .await
+        crate::split::central::run_peripheral_manager::<ROW, COL, ROW_OFFSET, COL_OFFSET, _>(self.id, self.receiver)
+            .await
     }
 }
 
@@ -175,8 +170,8 @@ pub struct InputDeviceCons<H, T> {
     tail: T,
 }
 
-impl<H: crate::core_traits::Runnable, T: crate::core_traits::Runnable>
-    crate::core_traits::Runnable for InputDeviceCons<H, T>
+impl<H: crate::core_traits::Runnable, T: crate::core_traits::Runnable> crate::core_traits::Runnable
+    for InputDeviceCons<H, T>
 {
     async fn run(&mut self) -> ! {
         let Self { head, tail } = self;
@@ -221,7 +216,15 @@ impl<'d, D: Driver<'d>> UsbExtensionFn<'d, D> for NoExtension {
 ///
 /// Generic type parameters track per-slot state. Defaults are no-op markers
 /// so the all-defaults case writes as `Rmk::new(config)`.
-pub struct Rmk<U = NoUsb, S = NoStorage, K = NoKeymap, M = NoMatrix, SCU = NoSplitCentralUart, ID = NoInputDevices, X = NoExtension> {
+pub struct Rmk<
+    U = NoUsb,
+    S = NoStorage,
+    K = NoKeymap,
+    M = NoMatrix,
+    SCU = NoSplitCentralUart,
+    ID = NoInputDevices,
+    X = NoExtension,
+> {
     rmk_config: RmkConfig<'static>,
     #[cfg_attr(feature = "_no_usb", allow(dead_code))]
     usb: U,
@@ -288,7 +291,13 @@ impl<U, S, K, M, SCU, ID, X> Rmk<U, S, K, M, SCU, ID, X> {
     /// Set the storage. Required when the `storage` feature is enabled.
     /// Takes ownership.
     #[cfg(feature = "storage")]
-    pub fn with_storage<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>(
+    pub fn with_storage<
+        F: AsyncNorFlash,
+        const ROW: usize,
+        const COL: usize,
+        const NUM_LAYER: usize,
+        const NUM_ENCODER: usize,
+    >(
         self,
         storage: Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>,
     ) -> Rmk<U, StorageHeld<F, ROW, COL, NUM_LAYER, NUM_ENCODER>, K, M, SCU, ID, X> {
@@ -475,14 +484,17 @@ where
 // case — BLE+split needs different `run_peripheral_manager` arguments
 // (addr table + stack ref) which need a different slot shape. Tracked
 // for follow-up.
-#[cfg(all(
-    not(feature = "_no_usb"),
-    feature = "_ble",
-    feature = "host",
-    feature = "storage",
-))]
+#[cfg(all(not(feature = "_no_usb"), feature = "_ble", feature = "host", feature = "storage",))]
 impl<D, F, M, ID, const STG_ROW: usize, const STG_COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize, X>
-    Rmk<Usb<D>, StorageHeld<F, STG_ROW, STG_COL, NUM_LAYER, NUM_ENCODER>, Keymap, MatrixHeld<M>, NoSplitCentralUart, ID, X>
+    Rmk<
+        Usb<D>,
+        StorageHeld<F, STG_ROW, STG_COL, NUM_LAYER, NUM_ENCODER>,
+        Keymap,
+        MatrixHeld<M>,
+        NoSplitCentralUart,
+        ID,
+        X,
+    >
 where
     D: Driver<'static>,
     F: AsyncNorFlash,
@@ -552,14 +564,17 @@ where
 
 // `.run()` for the `_no_usb` BLE-only path. Same restriction on split as
 // the USB+BLE impl.
-#[cfg(all(
-    feature = "_no_usb",
-    feature = "_ble",
-    feature = "host",
-    feature = "storage",
-))]
+#[cfg(all(feature = "_no_usb", feature = "_ble", feature = "host", feature = "storage",))]
 impl<F, M, ID, const STG_ROW: usize, const STG_COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize, X>
-    Rmk<NoUsb, StorageHeld<F, STG_ROW, STG_COL, NUM_LAYER, NUM_ENCODER>, Keymap, MatrixHeld<M>, NoSplitCentralUart, ID, X>
+    Rmk<
+        NoUsb,
+        StorageHeld<F, STG_ROW, STG_COL, NUM_LAYER, NUM_ENCODER>,
+        Keymap,
+        MatrixHeld<M>,
+        NoSplitCentralUart,
+        ID,
+        X,
+    >
 where
     F: AsyncNorFlash,
     M: crate::core_traits::Runnable,

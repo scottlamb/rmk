@@ -904,10 +904,7 @@ impl LegacyState {
                 // hold-latch comparison stays correct.
                 let dx = f.x as i32 - s.start_x as i32;
                 let dy = f.y as i32 - s.start_y as i32;
-                let dsq = dx
-                    .saturating_mul(dx)
-                    .saturating_add(dy.saturating_mul(dy))
-                    .max(0) as u32;
+                let dsq = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)).max(0) as u32;
                 s.max_dev_sq = s.max_dev_sq.max(dsq);
                 if !s.hold_latched
                     && s.max_n == 1
@@ -1042,11 +1039,7 @@ impl LegacyState {
     /// hold OR'd with routed) when it differs from what we last sent.
     /// No-op when the buttons match the last emission — keeps the line
     /// quiet on no-op events.
-    fn process_button_event(
-        &mut self,
-        routed_buttons: u8,
-        out: &mut heapless::Vec<TrackpadReport, MAX_OUTPUTS>,
-    ) {
+    fn process_button_event(&mut self, routed_buttons: u8, out: &mut heapless::Vec<TrackpadReport, MAX_OUTPUTS>) {
         let firmware_buttons = match &self.session {
             Some(s) if s.hold_latched => 0b001,
             _ => 0,

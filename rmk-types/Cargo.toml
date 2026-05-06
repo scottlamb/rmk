@@ -47,6 +47,7 @@ host = ["rmk_protocol", "bulk", "_ble", "split"]
 _ble = []
 split = []
 display = []
+rgb_lighting = []
 passkey_entry = []
 # Stenography (Plover HID) support: `StenoKey` + `Action::Steno` variant.
 steno = []

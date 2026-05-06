@@ -157,6 +157,15 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         SplitMessage::SleepState(sleeping) => {
                             publish_event(SleepStateEvent::new(sleeping));
                         }
+                        #[cfg(all(feature = "rgb_lighting", not(feature = "_ble")))]
+                        SplitMessage::LightingFrame(bytes) => {
+                            // Drop on full — the receiver task is running
+                            // and a freshly-arriving frame supersedes any
+                            // stale one. With capacity 1, this only loses
+                            // a frame if RX is starved (extremely unlikely
+                            // in practice).
+                            let _ = crate::light::rgb::LIGHTING_FRAME_RX.try_send(bytes);
+                        }
                         _ => (),
                     },
                     Err(e) => {

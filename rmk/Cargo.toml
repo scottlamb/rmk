@@ -56,6 +56,9 @@ embedded-graphics = { version = "0.8", optional = true }
 display-interface = { version = "0.5", optional = true }
 display-interface-i2c = { version = "0.5", optional = true }
 
+# RGB lighting dependencies
+smart-leds = { version = "0.4", optional = true }
+
 # Optional dependencies
 # BLE dependencies
 trouble-host = { git = "https://github.com/haobogu/trouble", rev = "690373fd1166d16225b875435dd0600c92570e7d", features = [
@@ -196,6 +199,13 @@ st7796 = ["lcd_async"]
 
 ## Enable async matrix scanning
 async_matrix = []
+
+## Enable per-key RGB lighting (traits + LightingProcessor). Drivers are
+## separate features (e.g. ws2812_pio_rp).
+rgb_lighting = ["dep:smart-leds", "rmk-types/rgb_lighting"]
+## Enable the RP2040 PIO-based WS2812 driver. Requires `rgb_lighting`
+## and `rp2040`.
+ws2812_pio_rp = ["rgb_lighting", "rp2040"]
 
 ## Enable split keyboard support.
 split = [

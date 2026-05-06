@@ -63,6 +63,7 @@ impl<'a> Keyboard<'a> {
             };
 
             self.update_osl(event);
+            self.publish_modifier_event_if_changed();
 
             // Send report for updated osm_state modifiers
             if was_active || activate_on_keypress {
@@ -78,6 +79,7 @@ impl<'a> Keyboard<'a> {
                             // Timeout, release modifiers
                             self.update_osl(event);
                             self.osm_state = OneShotState::None;
+                            self.publish_modifier_event_if_changed();
 
                             // Send release report because modifiers were held
                             if activate_on_keypress {
@@ -102,6 +104,7 @@ impl<'a> Keyboard<'a> {
                     // Release modifier
                     self.update_osl(event);
                     self.osm_state = OneShotState::None;
+                    self.publish_modifier_event_if_changed();
 
                     // This sends a separate hid report with the
                     // currently registered modifiers except the
@@ -179,6 +182,7 @@ impl<'a> Keyboard<'a> {
             }
             _ => false,
         }
+        self.publish_modifier_event_if_changed();
     }
 
     pub(crate) fn update_osl(&mut self, event: KeyboardEvent) {

@@ -10,7 +10,9 @@ use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use syn::parse_macro_input;
 
-use crate::codegen::central_builder::{expand_central_init, expand_central_setup, expand_peripheral_init};
+use crate::codegen::central_builder::{
+    expand_central_init, expand_central_setup, expand_keymap_setup, expand_peripheral_init,
+};
 use crate::codegen::parse_keyboard_mod;
 
 #[proc_macro_attribute]
@@ -82,6 +84,24 @@ pub fn central_init(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn central_setup(input: TokenStream) -> TokenStream {
     expand_central_setup(input.into()).into()
+}
+
+/// Subset of `central_setup!` that emits *only* the keymap data —
+/// the matrix-shape consts (`ROW`/`COL`/`NUM_LAYER`/`NUM_ENCODER`)
+/// and the `get_default_keymap()` / `get_default_encoder_map()`
+/// functions. Skips `KEYBOARD_DEVICE_CONFIG`, the Vial statics, and
+/// `bind_interrupts!`.
+///
+/// Useful from a shared module that both halves of a split keyboard
+/// import — peripherals don't have a `KeyMap` runtime instance, but
+/// they may want the static keymap data to drive accessory rendering
+/// (per-key RGB lighting, status displays). Calling
+/// `central_setup!` from a shared module would conflict with each
+/// bin's own `bind_interrupts!(struct Irqs { … })`; this macro
+/// avoids that.
+#[proc_macro]
+pub fn keymap_setup(input: TokenStream) -> TokenStream {
+    expand_keymap_setup(input.into()).into()
 }
 
 /// Function-style macro for the peripheral half. Reads `keyboard.toml`,

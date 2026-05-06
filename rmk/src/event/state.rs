@@ -58,3 +58,23 @@ impl SleepStateEvent {
 }
 
 impl_payload_wrapper!(SleepStateEvent, bool);
+
+/// Caps Word activation changed event. Fires when the keyboard's
+/// internal caps-word state machine activates, deactivates, or times
+/// out at the next keypress. Subscribers (RGB lighting overlays that
+/// highlight Shift keys) get a state signal that's independent of the
+/// host caps-lock LED indicator (caps-word is firmware-only — it
+/// shifts subsequent letters by injecting Shift into the resolved
+/// modifiers, without ever toggling host caps-lock).
+#[event(channel_size = crate::CAPS_WORD_EVENT_CHANNEL_SIZE, pubs = crate::CAPS_WORD_EVENT_PUB_SIZE, subs = crate::CAPS_WORD_EVENT_SUB_SIZE)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct CapsWordEvent(pub bool);
+
+impl CapsWordEvent {
+    pub fn new(active: bool) -> Self {
+        Self(active)
+    }
+}
+
+impl_payload_wrapper!(CapsWordEvent, bool);

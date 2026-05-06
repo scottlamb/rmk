@@ -6,6 +6,22 @@ use futures::FutureExt;
 use super::SplitMessage;
 use crate::event::{KeyboardEvent, KeyboardEventPos, SubscribableEvent, publish_event, publish_event_async};
 
+/// Build the next central→peripheral lighting frame. The
+/// `select_biased_with_feature!` arm in `run_central_link` always pulls
+/// it, gated on `rgb_lighting`. With `_ble` also enabled, the GATT
+/// service can't carry a 100-byte buffer (its `[u8; N]::default()` only
+/// works ≤32 bytes), so this returns a never-completing future on that
+/// build — the LED stack still works on the central locally; just no
+/// frame transit to the peripheral. RGB-over-BLE is a follow-up.
+#[cfg(all(feature = "rgb_lighting", not(feature = "_ble")))]
+async fn next_lighting_frame_split_msg() -> SplitMessage {
+    SplitMessage::LightingFrame(crate::light::rgb::LIGHTING_FRAME_TX.receive().await)
+}
+#[cfg(all(feature = "rgb_lighting", feature = "_ble"))]
+async fn next_lighting_frame_split_msg() -> SplitMessage {
+    core::future::pending::<SplitMessage>().await
+}
+
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum SplitDriverError {
@@ -126,6 +142,7 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                     with_feature("display"): e = wpm_sub.next_event().fuse() => SplitMessage::Wpm(e.0),
                     with_feature("display"): e = modifier_sub.next_event().fuse() => SplitMessage::Modifier(e.modifier.into_bits()),
                     with_feature("display"): e = sleep_sub.next_event().fuse() => SplitMessage::SleepState(e.0),
+                    with_feature("rgb_lighting"): msg = next_lighting_frame_split_msg().fuse() => msg,
                 }
             };
 

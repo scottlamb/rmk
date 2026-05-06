@@ -228,6 +228,24 @@ impl KeyMapInner<'_> {
         self.default_layer
     }
 
+    /// Walk active layers top-to-bottom, returning the first layer
+    /// whose action at this position isn't `Transparent`. Mirrors the
+    /// resolution `get_action_with_layer_cache` performs at key-press
+    /// time (minus the cache write, since this is called read-only
+    /// from accessory surfaces, not the matrix path).
+    fn get_effective_layer_at(&self, row: u8, col: u8) -> Option<u8> {
+        let pos = KeyboardEventPos::key_pos(col, row);
+        for layer_idx in (0..self.num_layer).rev() {
+            if self.layer_state[layer_idx] || layer_idx as u8 == self.default_layer {
+                let action = self.get_action_at(pos, layer_idx);
+                if action != KeyAction::Transparent {
+                    return Some(layer_idx as u8);
+                }
+            }
+        }
+        None
+    }
+
     fn pop_layer_from_cache(&mut self, pos: KeyboardEventPos) -> u8 {
         match pos {
             KeyboardEventPos::Key(key_pos) => {
@@ -446,6 +464,20 @@ impl<'a> KeyMap<'a> {
     /// Active layer index (after layer-toggle/momentary updates).
     pub fn active_layer(&self) -> u8 {
         self.inner.borrow().get_activated_layer()
+    }
+
+    /// Layer that currently defines the action at `(row, col)`, after
+    /// honoring layer activation state and `Transparent` fall-through.
+    /// Returns `None` if every active layer (and the default layer) is
+    /// `Transparent` at this position — i.e. the key has no defined
+    /// action right now.
+    ///
+    /// This mirrors the resolution the keymap engine performs at
+    /// key-press time. Useful for accessory surfaces (status displays,
+    /// per-key RGB) that want to render each key by which layer is
+    /// currently in effect for it.
+    pub fn effective_layer_at_pos(&self, row: u8, col: u8) -> Option<u8> {
+        self.inner.borrow().get_effective_layer_at(row, col)
     }
 
     pub(crate) fn set_action_at(&self, pos: KeyboardEventPos, layer: usize, action: KeyAction) {

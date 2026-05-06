@@ -21,8 +21,8 @@ use crate::core_traits::Runnable;
 #[cfg(all(feature = "split", feature = "_ble"))]
 use crate::event::ClearPeerEvent;
 use crate::event::{
-    ActionEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, MouseButtonsEvent, SubscribableEvent, publish_event,
-    publish_event_async,
+    ActionEvent, CapsWordEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, MouseButtonsEvent, SubscribableEvent,
+    publish_event, publish_event_async,
 };
 use crate::hid::{KeyboardReport, Report};
 use crate::keyboard::combo::Combo;
@@ -224,6 +224,23 @@ pub struct Keyboard<'a> {
     /// The held modifiers for the keyboard hid report
     held_modifiers: ModifierCombination,
 
+    /// Last modifier combination published via `ModifierEvent`, used to
+    /// dedupe redundant events. The published value is `held_modifiers
+    /// | osm_state.value()` — i.e. what subscribers (OLED, RGB
+    /// lighting) need to see "what modifiers are currently in effect."
+    /// OSM state transitions that don't change the effective set
+    /// (e.g. `Initial → Held` on first non-OSM key press) shouldn't
+    /// fan out as no-op events.
+    last_published_modifiers: ModifierCombination,
+
+    /// Last caps-word active state published via `CapsWordEvent`, used
+    /// to dedupe. Note: caps-word state can become "stale" (state
+    /// machine still `Activated` but past timeout) until the next
+    /// `check()` call deactivates it; subscribers will see the
+    /// trailing-glow LED until then. Acceptable since the stale
+    /// period only matters when the user has stopped typing.
+    last_published_caps_word: bool,
+
     /// The held keys for the keyboard hid report, except the modifiers
     held_keycodes: [HidKeyCode; 6],
 
@@ -270,6 +287,8 @@ impl<'a> Keyboard<'a> {
             held_buffer: HeldBuffer::new(),
             registered_keys: [None; 6],
             held_modifiers: ModifierCombination::default(),
+            last_published_modifiers: ModifierCombination::default(),
+            last_published_caps_word: false,
             held_keycodes: [HidKeyCode::No; 6],
             mouse: MouseState::new(),
             media_report: MediaKeyboardReport { usage_id: 0 },
@@ -310,10 +329,7 @@ impl<'a> Keyboard<'a> {
     ///
     /// The given holding key is a copy of the buffered key. Only tap-hold keys are considered now.
     pub async fn process_buffered_key(&mut self, key: HeldKey) {
-        debug!(
-            "Processing buffered key: \nevent: {:?} state: {:?}",
-            key.event, key.state
-        );
+        debug!("Processing buffered key: event: {:?} state: {:?}", key.event, key.state);
         match key.state {
             KeyState::WaitingCombo => {
                 debug!(
@@ -410,7 +426,8 @@ impl<'a> Keyboard<'a> {
                 } else {
                     key_action
                 };
-                self.process_key_action_inner(key_action, event, event_time, is_combo).await
+                self.process_key_action_inner(key_action, event, event_time, is_combo)
+                    .await
             }
             KeyBehaviorDecision::Buffer => {
                 debug!("Current key is buffered");
@@ -436,7 +453,8 @@ impl<'a> Keyboard<'a> {
                 } else {
                     key_action
                 };
-                self.process_key_action_inner(key_action, event, event_time, is_combo).await
+                self.process_key_action_inner(key_action, event, event_time, is_combo)
+                    .await
             }
             KeyBehaviorDecision::FlowTap => {
                 let action = Self::action_from_pattern(self.keymap, key_action, TAP); //tap action
@@ -836,7 +854,8 @@ impl<'a> Keyboard<'a> {
                 _ => unreachable!(),
             }
         } else {
-            self.process_key_action_morse(&key_action, event, event_time, is_combo).await;
+            self.process_key_action_morse(&key_action, event, event_time, is_combo)
+                .await;
         }
         self.try_finish_forks(original_key_action, event);
     }
@@ -1480,6 +1499,7 @@ impl<'a> Keyboard<'a> {
                 // Handle Caps Word
                 if event.pressed {
                     self.caps_word.toggle();
+                    self.publish_caps_word_event_if_changed();
                 };
             }
             KeyboardAction::ComboOn => self.combo_on = true,
@@ -1533,6 +1553,7 @@ impl<'a> Keyboard<'a> {
 
             // Check Caps Word
             self.caps_word.check(hid_keycode);
+            self.publish_caps_word_event_if_changed();
         }
 
         match key {
@@ -1893,10 +1914,7 @@ impl<'a> Keyboard<'a> {
     /// Register a modifier to be sent in hid report.
     fn register_modifier_key(&mut self, key: HidKeyCode) {
         self.held_modifiers |= key.to_hid_modifiers();
-
-        publish_event(ModifierEvent {
-            modifier: self.held_modifiers,
-        });
+        self.publish_modifier_event_if_changed();
 
         // if a modifier key arrives after fork activation, it should be kept
         self.fork_keep_mask |= key.to_hid_modifiers();
@@ -1905,19 +1923,13 @@ impl<'a> Keyboard<'a> {
     /// Unregister a modifier from hid report.
     fn unregister_modifier_key(&mut self, key: HidKeyCode) {
         self.held_modifiers &= !key.to_hid_modifiers();
-
-        publish_event(ModifierEvent {
-            modifier: self.held_modifiers,
-        });
+        self.publish_modifier_event_if_changed();
     }
 
     /// Register a modifier combination to be sent in hid report.
     fn register_modifiers(&mut self, modifiers: ModifierCombination) {
         self.held_modifiers |= modifiers;
-
-        publish_event(ModifierEvent {
-            modifier: self.held_modifiers,
-        });
+        self.publish_modifier_event_if_changed();
 
         // if a modifier key arrives after fork activation, it should be kept
         self.fork_keep_mask |= modifiers;
@@ -1926,10 +1938,33 @@ impl<'a> Keyboard<'a> {
     /// Unregister a modifier combination from hid report.
     fn unregister_modifiers(&mut self, modifiers: ModifierCombination) {
         self.held_modifiers &= !modifiers;
+        self.publish_modifier_event_if_changed();
+    }
 
-        publish_event(ModifierEvent {
-            modifier: self.held_modifiers,
-        });
+    /// Publish `ModifierEvent` reflecting modifiers currently asserted
+    /// to the host: `held_modifiers | osm_state.value()`. Subscribers
+    /// (OLED, RGB lighting) want a single view of "what modifiers are
+    /// in effect for the next keypress" — armed one-shots count, even
+    /// before the resolved-modifier HID report is built. Deduped
+    /// against `last_published_modifiers` so OSM state transitions
+    /// that don't change the visible set don't fan out as no-ops.
+    pub(crate) fn publish_modifier_event_if_changed(&mut self) {
+        let current = self.held_modifiers | self.osm_state.value().copied().unwrap_or_default();
+        if current != self.last_published_modifiers {
+            publish_event(ModifierEvent { modifier: current });
+            self.last_published_modifiers = current;
+        }
+    }
+
+    /// Publish `CapsWordEvent` if `caps_word.is_active()` has changed.
+    /// Called from the two CapsWordState mutation sites (toggle on
+    /// `CapsWordToggle`, and per-keypress `check()`).
+    pub(crate) fn publish_caps_word_event_if_changed(&mut self) {
+        let active = self.caps_word.is_active();
+        if active != self.last_published_caps_word {
+            publish_event(CapsWordEvent(active));
+            self.last_published_caps_word = active;
+        }
     }
 }
 

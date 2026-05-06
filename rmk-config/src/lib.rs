@@ -383,6 +383,7 @@ define_event_config!(
     wpm_update,
     led_indicator,
     sleep_state,
+    caps_word,
     // Power events
     battery_status,
     battery_adc,

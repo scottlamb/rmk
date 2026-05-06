@@ -90,7 +90,17 @@ pub struct RotaryEncoderPos {
 // Modifier Events
 // ============================================================================
 
-/// Modifier keys combination changed event
+/// Modifier keys combination changed event.
+///
+/// `modifier` is the set of modifiers currently in effect for the
+/// next keypress: held modifier keys *plus* any one-shot modifier
+/// that's been armed (`OneShotState::Initial | Single | Held`). This
+/// matches what the resolved-modifier HID report will assert, so
+/// status displays (OLED) and indicators (RGB lighting) can show one
+/// view of "what's in the next press" without tracking OSM state
+/// separately. Deduped against the previous published value, so OSM
+/// transitions that don't change the visible set (e.g. `Initial →
+/// Held` on first non-OSM key press) don't generate redundant events.
 #[event(channel_size = crate::MODIFIER_EVENT_CHANNEL_SIZE, pubs = crate::MODIFIER_EVENT_PUB_SIZE, subs = crate::MODIFIER_EVENT_SUB_SIZE)]
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

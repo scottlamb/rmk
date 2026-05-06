@@ -23,6 +23,32 @@ events = [
     { name = "battery_status" },
 ]
 
+# --- RGB-lighting-gated internal subscribers ---
+
+[[subscriber]]
+features = ["rgb_lighting"]
+events = [
+    # light/rgb/processor.rs: LightingProcessor subscribes to these
+    { name = "layer_change" },
+    { name = "modifier" },
+    { name = "led_indicator" },
+    { name = "caps_word" },
+]
+
+[[subscriber]]
+features = ["rgb_lighting", "split"]
+events = [
+    # On a split with rgb_lighting, the central typically runs a
+    # second LightingProcessor that renders the peripheral's frame
+    # and ships the bytes over the split link (see
+    # `run_split_lighting_receiver` on the peripheral). Same
+    # subscription set as the local processor.
+    { name = "layer_change" },
+    { name = "modifier" },
+    { name = "led_indicator" },
+    { name = "caps_word" },
+]
+
 [[subscriber]]
 features = ["display", "_ble"]
 events = [
