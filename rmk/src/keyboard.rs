@@ -410,7 +410,7 @@ impl<'a> Keyboard<'a> {
                 } else {
                     key_action
                 };
-                self.process_key_action_inner(key_action, event, event_time).await
+                self.process_key_action_inner(key_action, event, event_time, is_combo).await
             }
             KeyBehaviorDecision::Buffer => {
                 debug!("Current key is buffered");
@@ -436,7 +436,7 @@ impl<'a> Keyboard<'a> {
                 } else {
                     key_action
                 };
-                self.process_key_action_inner(key_action, event, event_time).await
+                self.process_key_action_inner(key_action, event, event_time, is_combo).await
             }
             KeyBehaviorDecision::FlowTap => {
                 let action = Self::action_from_pattern(self.keymap, key_action, TAP); //tap action
@@ -554,13 +554,28 @@ impl<'a> Keyboard<'a> {
                     // Releasing the current key, will always be tapping, because timeout isn't here
                     let mut resolved = false;
                     if let Some(mut held_key) = self.held_buffer.remove_if(|k| k.event.pos == pos) {
-                        // Always re-evaluate action based on current layer state.
-                        // A prior layer change (e.g. permissive hold activating a layer)
-                        // may have changed what action this key maps to.
-                        let key_action = self.keymap.get_action_with_layer_cache(held_key.event);
-                        if key_action != held_key.action {
-                            keyboard_state_updated = true;
-                        }
+                        // Re-evaluate action based on current layer state for
+                        // entries pushed by a normal press — a layer change
+                        // since the press (e.g. permissive hold activating a
+                        // layer) means the buffered key should resolve as
+                        // the new layer's action, not what its position
+                        // mapped to at press time.
+                        //
+                        // Combo-output entries are different: the keymap
+                        // action for this position is *not* what we
+                        // dispatched (the combo overrode it), so
+                        // re-derivation would discard the combo output and
+                        // fire the underlying-layer key. Use the held
+                        // action verbatim instead.
+                        let key_action = if held_key.is_combo {
+                            held_key.action
+                        } else {
+                            let derived = self.keymap.get_action_with_layer_cache(held_key.event);
+                            if derived != held_key.action {
+                                keyboard_state_updated = true;
+                            }
+                            derived
+                        };
                         debug!("Processing current key before releasing: {:?}", held_key.event);
                         if !key_action.is_morse() {
                             match key_action {
@@ -629,7 +644,10 @@ impl<'a> Keyboard<'a> {
                         // Note: Morse like actions are not expected here.
                         assert!(!action.is_morse());
                         debug!("Tap Key {:?} now press down, action: {:?}", held_key.event, action);
-                        self.process_key_action_inner(&action, held_key.event, held_key.press_time)
+                        // `held_key.is_combo` carries through if this was a
+                        // combo-output entry so process_key_action_inner can
+                        // tag any new buffered entries the same way.
+                        self.process_key_action_inner(&action, held_key.event, held_key.press_time, held_key.is_combo)
                             .await;
                     }
                 }
@@ -794,6 +812,7 @@ impl<'a> Keyboard<'a> {
         original_key_action: &KeyAction,
         event: KeyboardEvent,
         event_time: Instant,
+        is_combo: bool,
     ) {
         // Start forks
         let key_action = self.try_start_forks(original_key_action, event);
@@ -817,7 +836,7 @@ impl<'a> Keyboard<'a> {
                 _ => unreachable!(),
             }
         } else {
-            self.process_key_action_morse(&key_action, event, event_time).await;
+            self.process_key_action_morse(&key_action, event, event_time, is_combo).await;
         }
         self.try_finish_forks(original_key_action, event);
     }

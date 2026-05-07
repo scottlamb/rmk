@@ -60,6 +60,7 @@ impl<'a> Keyboard<'a> {
         key_action: &KeyAction,
         event: KeyboardEvent,
         event_time: Instant,
+        is_combo: bool,
     ) {
         debug!("Processing morse keys: {:?}", event);
         assert!(key_action.is_morse());
@@ -81,14 +82,28 @@ impl<'a> Keyboard<'a> {
                     }
                 }
                 None => {
-                    // Add to buffer
-                    self.held_buffer.push(HeldKey::new(
-                        event,
-                        *key_action,
-                        KeyState::Pressed(MorsePattern::default()),
-                        event_time,
-                        timeout_time,
-                    ));
+                    // Add to buffer. `is_combo` flags the entry as a
+                    // combo output so the release path skips the
+                    // layer-current re-derivation that would discard
+                    // the combo override.
+                    let entry = if is_combo {
+                        HeldKey::new_combo(
+                            event,
+                            *key_action,
+                            KeyState::Pressed(MorsePattern::default()),
+                            event_time,
+                            timeout_time,
+                        )
+                    } else {
+                        HeldKey::new(
+                            event,
+                            *key_action,
+                            KeyState::Pressed(MorsePattern::default()),
+                            event_time,
+                            timeout_time,
+                        )
+                    };
+                    self.held_buffer.push(entry);
                 }
             }
         } else {

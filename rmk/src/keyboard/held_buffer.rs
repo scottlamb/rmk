@@ -133,6 +133,14 @@ pub struct HeldKey {
     pub press_time: Instant,
     /// The timeout time for the key
     pub timeout_time: Instant,
+    /// True when `action` was supplied by a triggered combo (the
+    /// combo's output), rather than derived from the keymap at the
+    /// position. Distinguishes combo-output entries from regular
+    /// press-buffered entries when both end up morse-buffered with
+    /// the same `state`. The release path uses this to skip the
+    /// layer-current re-derivation that would otherwise discard the
+    /// combo override.
+    pub is_combo: bool,
 }
 
 impl HeldKey {
@@ -149,6 +157,24 @@ impl HeldKey {
             state,
             press_time,
             timeout_time,
+            is_combo: false,
+        }
+    }
+
+    pub fn new_combo(
+        event: KeyboardEvent,
+        action: KeyAction,
+        state: KeyState,
+        press_time: Instant,
+        timeout_time: Instant,
+    ) -> Self {
+        Self {
+            event,
+            action,
+            state,
+            press_time,
+            timeout_time,
+            is_combo: true,
         }
     }
 }

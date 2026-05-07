@@ -13,6 +13,63 @@ use rmk_types::morse::{MorseMode, MorseProfile};
 use crate::common::morse::create_simple_morse_keyboard;
 use crate::common::{KC_LGUI, KC_LSHIFT};
 
+/// Keyboard fixture for combos whose output is itself a tap-hold
+/// (morse) action. Distinct from `create_permissive_hold_keyboard_
+/// with_combo` which only has Single-key outputs — the bug where
+/// release re-derives the per-position keymap action and discards
+/// the combo override only manifests when the combo output is morse,
+/// because that's when the output gets buffered (Single outputs fire
+/// directly without buffering).
+fn create_keyboard_with_morse_output_combo() -> Keyboard<'static> {
+    let combo_key = KeyAction::TapHold(
+        Action::Key(KeyCode::Hid(HidKeyCode::B)),
+        Action::Modifier(ModifierCombination::LSHIFT),
+        Default::default(),
+    );
+    let combo_key_2 = KeyAction::TapHold(
+        Action::Key(KeyCode::Hid(HidKeyCode::C)),
+        Action::Modifier(ModifierCombination::LGUI),
+        Default::default(),
+    );
+    // Combo output: TapHold whose tap is Key(F) and hold activates
+    // layer 1. The keymap entries at the combo trigger positions
+    // ([0,1] and [0,2]) map to the trigger keys themselves
+    // (mt!(B,..), mt!(C,..)) — so a re-derivation against the
+    // current layer at release would produce B or C, not F.
+    let combo_output = KeyAction::TapHold(
+        Action::Key(KeyCode::Hid(HidKeyCode::F)),
+        Action::LayerOn(1),
+        Default::default(),
+    );
+    create_simple_morse_keyboard(BehaviorConfig {
+        morse: MorsesConfig {
+            enable_flow_tap: false,
+            default_profile: MorseProfile::new(
+                Some(false),
+                Some(MorseMode::PermissiveHold),
+                Some(250u16),
+                Some(250u16),
+            ),
+            ..Default::default()
+        },
+        combo: CombosConfig {
+            combos: [
+                Some(Combo::new(ComboConfig::new([combo_key, combo_key_2], combo_output, None))),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+            timeout: Duration::from_millis(50),
+            prior_idle_time: None,
+        },
+        ..BehaviorConfig::default()
+    })
+}
+
 fn create_permissive_hold_keyboard() -> Keyboard<'static> {
     create_simple_morse_keyboard(BehaviorConfig {
         morse: MorsesConfig {
@@ -861,6 +918,39 @@ fn test_with_combo_8() {
             [0, [kc_to_u8!(B), 0, 0, 0, 0, 0]],
             [0, [0, 0, 0, 0, 0, 0]],
             [0, [kc_to_u8!(Kp3), 0, 0, 0, 0, 0]],
+            [0, [0, 0, 0, 0, 0, 0]],
+        ]
+    };
+}
+
+/// Regression test: a combo whose output is itself a tap-hold should
+/// release as that tap-hold's tap action, not as the keymap entry at
+/// the combo trigger's position.
+///
+/// Previously the release path in `fire_held_keys` always re-derived
+/// the action against the current layer's keymap. For a combo
+/// output buffered as morse, that throws away the combo override and
+/// fires the position's underlying-layer key — e.g. an `S+D → TT(1)`
+/// combo would resolve as `D` on release instead of toggling layer 1.
+/// `HeldKey::is_combo` distinguishes combo-output entries from
+/// regular press-buffered entries so this branch can preserve the
+/// combo's action on release.
+#[test]
+fn test_combo_with_morse_output_release_fires_combo_tap() {
+    key_sequence_test! {
+        keyboard: create_keyboard_with_morse_output_combo(),
+        sequence: [
+            // Trigger combo within its 50 ms window, then release both
+            // keys quickly (well under the 250 ms morse hold timeout)
+            // so the combo output's TapHold resolves as a tap.
+            [0, 1, true, 10],   // Press mt!(B, LShift) — combo trigger
+            [0, 2, true, 20],   // Press mt!(C, LGui) — combo fires
+            [0, 1, false, 30],  // Release B (partial combo release)
+            [0, 2, false, 30],  // Release C (combo fully releases)
+        ],
+        expected_reports: [
+            // Only the combo output's tap fires — no B, no C, no D.
+            [0, [kc_to_u8!(F), 0, 0, 0, 0, 0]],
             [0, [0, 0, 0, 0, 0, 0]],
         ]
     };
