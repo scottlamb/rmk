@@ -987,6 +987,69 @@ pub struct Iqs5xxConfig {
     /// ranges match the post-swap output.
     #[serde(default)]
     pub swap_xy: bool,
+    /// Panel physical width, in whole millimetres. Required when building
+    /// with `feature = "ptp"`; the value is baked into the HID descriptor
+    /// (Physical Maximum X) so the host can compute touch density. Match
+    /// what the trackpad module's datasheet says (e.g. 60 mm for a
+    /// TPS65-501b after the swap_xy flip puts the long axis on Y).
+    #[serde(default)]
+    pub physical_mm_x: u16,
+    /// Panel physical height, in whole millimetres. Same role as
+    /// `physical_mm_x` for the Y axis.
+    #[serde(default)]
+    pub physical_mm_y: u16,
+    /// Panel logical-coordinate maximum on the X axis. The IQS5xx itself
+    /// computes this as `(rx_channels − 1) × 256` (§5.4) — read your
+    /// trackpad module's datasheet for the channel count, or boot the
+    /// firmware once and the device prints its `x_resolution`. For a
+    /// TPS65-501b after `swap_xy`, X has 9 channels → 2048. Required
+    /// when `feature = "ptp"` is enabled.
+    #[serde(default)]
+    pub logical_max_x: u16,
+    /// Panel logical-coordinate maximum on the Y axis.
+    /// Computed by the IQS5xx as `(tx_channels − 1) × 256`.
+    #[serde(default)]
+    pub logical_max_y: u16,
+    /// Tap/hold deviation budget in whole mm. A 1-finger touch whose
+    /// start-to-now Euclidean distance stays within this radius for the
+    /// whole session is eligible to register as a tap (or, if held for
+    /// `hold_time_ms`, a press-and-hold-then-drag). 2 mm is a comfortable
+    /// wobble budget without sacrificing real tap detection.
+    #[serde(default = "default_iqs5xx_tap_max_dev_mm")]
+    pub tap_max_dev_mm: u16,
+    /// Maximum touch duration that still counts as a tap, in milliseconds.
+    /// Default 150 ms — matches the IQS5xx NV default.
+    #[serde(default = "default_iqs5xx_tap_time_ms")]
+    pub tap_time_ms: u16,
+    /// Minimum touch duration before a stationary 1-finger touch latches
+    /// button 1 (press-and-hold-then-drag), in milliseconds. Default 450
+    /// ms — a tap that doesn't release becomes a drag at this point.
+    #[serde(default = "default_iqs5xx_hold_time_ms")]
+    pub hold_time_ms: u16,
+    /// Legacy-mouse cursor sensitivity in mouse units per millimetre of
+    /// finger motion on the panel. Same convention the
+    /// `macos-trackpad-companion` userspace app uses for its own cursor
+    /// scale, so a feel that's comfortable in PTP mode there transfers
+    /// to legacy mode here. Default `3.0` ≈ a lightly-accelerated low-DPI
+    /// mouse; raise (e.g. `25.0`) to match a typical macOS pointer feel.
+    /// Resolved to per-axis fixed-point at startup against the panel's
+    /// chip-units-per-mm — non-square pixel pitch (different X vs Y
+    /// channel density) is handled there, not here.
+    #[serde(default = "default_iqs5xx_sensitivity")]
+    pub sensitivity: f32,
+}
+
+fn default_iqs5xx_tap_max_dev_mm() -> u16 {
+    2
+}
+fn default_iqs5xx_tap_time_ms() -> u16 {
+    150
+}
+fn default_iqs5xx_hold_time_ms() -> u16 {
+    450
+}
+fn default_iqs5xx_sensitivity() -> f32 {
+    25.0
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

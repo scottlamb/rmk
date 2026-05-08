@@ -37,6 +37,8 @@ pub(crate) struct UsbKeyboardWriter<'a, 'd, D: Driver<'d>> {
     pub(crate) other_writer: &'a mut HidWriter<'d, D, 9>,
     #[cfg(feature = "steno")]
     pub(crate) steno_writer: &'a mut HidWriter<'d, D, 9>,
+    #[cfg(feature = "ptp")]
+    pub(crate) trackpad_writer: &'a mut HidWriter<'d, D, { crate::input_device::trackpad_hid::TRACKPAD_WRITER_BUF }>,
 }
 
 impl<'a, 'd, D: Driver<'d>> UsbKeyboardWriter<'a, 'd, D> {
@@ -44,12 +46,19 @@ impl<'a, 'd, D: Driver<'d>> UsbKeyboardWriter<'a, 'd, D> {
         keyboard_writer: &'a mut HidWriter<'d, D, 8>,
         other_writer: &'a mut HidWriter<'d, D, 9>,
         #[cfg(feature = "steno")] steno_writer: &'a mut HidWriter<'d, D, 9>,
+        #[cfg(feature = "ptp")] trackpad_writer: &'a mut HidWriter<
+            'd,
+            D,
+            { crate::input_device::trackpad_hid::TRACKPAD_WRITER_BUF },
+        >,
     ) -> Self {
         Self {
             keyboard_writer,
             other_writer,
             #[cfg(feature = "steno")]
             steno_writer,
+            #[cfg(feature = "ptp")]
+            trackpad_writer,
         }
     }
 
@@ -118,6 +127,16 @@ impl<'d, D: Driver<'d>> HidWriterTrait for UsbKeyboardWriter<'_, 'd, D> {
             Report::MouseReport(r) => self.write_composite(CompositeReportType::Mouse, r).await,
             Report::MediaKeyboardReport(r) => self.write_composite(CompositeReportType::Media, r).await,
             Report::SystemControlReport(r) => self.write_composite(CompositeReportType::System, r).await,
+            #[cfg(feature = "ptp")]
+            Report::TrackpadReport(r) => {
+                let mut buf = [0u8; crate::input_device::trackpad_hid::TRACKPAD_WRITER_BUF];
+                let n = r.serialize(&mut buf).map_err(|_| HidError::ReportSerializeError)?;
+                self.trackpad_writer
+                    .write(&buf[..n])
+                    .await
+                    .map_err(HidError::UsbEndpointError)?;
+                Ok(n)
+            }
             #[cfg(feature = "steno")]
             Report::StenoReport(steno_report) => {
                 let mut buf: [u8; 9] = [0; 9];
@@ -160,10 +179,15 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(driver: D, keyboard_config: Dev
     usb_config.device_protocol = 0x01;
     usb_config.composite_with_iads = true;
 
-    // Extra HID interfaces (usb_log, steno) overflow the 128-byte config descriptor buffer.
-    #[cfg(any(feature = "usb_log", feature = "steno"))]
+    // Extra HID interfaces (usb_log, steno, ptp) overflow the 128-byte config
+    // descriptor buffer. PTP additionally needs a control buffer that fits
+    // the 257-byte Get_Report(Feature 0x0F) PTPHQA response (1 byte report
+    // ID + 256-byte blob).
+    #[cfg(feature = "ptp")]
+    const USB_BUF_SIZE: usize = 320;
+    #[cfg(all(not(feature = "ptp"), any(feature = "usb_log", feature = "steno")))]
     const USB_BUF_SIZE: usize = 256;
-    #[cfg(not(any(feature = "usb_log", feature = "steno")))]
+    #[cfg(not(any(feature = "usb_log", feature = "steno", feature = "ptp")))]
     const USB_BUF_SIZE: usize = 128;
 
     static CONFIG_DESC: StaticCell<[u8; USB_BUF_SIZE]> = StaticCell::new();
@@ -196,6 +220,8 @@ pub struct UsbTransport<D: Driver<'static>> {
     other_writer: HidWriter<'static, D, 9>,
     #[cfg(feature = "steno")]
     steno_writer: HidWriter<'static, D, 9>,
+    #[cfg(feature = "ptp")]
+    trackpad_writer: HidWriter<'static, D, { crate::input_device::trackpad_hid::TRACKPAD_WRITER_BUF }>,
     #[cfg(feature = "host")]
     host_rw: HidReaderWriter<'static, D, 32, 32>,
     #[cfg(feature = "usb_log")]
@@ -228,6 +254,12 @@ impl<D: Driver<'static>> UsbTransport<D> {
         let other_writer = add_usb_writer!(&mut builder, CompositeReport, 9, 16);
         #[cfg(feature = "steno")]
         let steno_writer = add_usb_writer!(&mut builder, StenoReport, 9, 16);
+        #[cfg(feature = "ptp")]
+        // Slot 0: the single supported trackpad in this revision. A
+        // multi-trackpad commit will turn this into a vector indexed by
+        // slot (matching the macro-generated processor initializers,
+        // which already pass an id).
+        let trackpad_writer = add_trackpad_usb_writer!(&mut builder, 0);
         #[cfg(feature = "host")]
         let host_rw = add_usb_reader_writer!(&mut builder, ViaReport, 32, 32, 32);
         #[cfg(feature = "usb_log")]
@@ -243,6 +275,8 @@ impl<D: Driver<'static>> UsbTransport<D> {
             other_writer,
             #[cfg(feature = "steno")]
             steno_writer,
+            #[cfg(feature = "ptp")]
+            trackpad_writer,
             #[cfg(feature = "host")]
             host_rw,
             #[cfg(feature = "usb_log")]
@@ -260,6 +294,8 @@ impl<D: Driver<'static>> Runnable for UsbTransport<D> {
             other_writer,
             #[cfg(feature = "steno")]
             steno_writer,
+            #[cfg(feature = "ptp")]
+            trackpad_writer,
             #[cfg(feature = "host")]
             host_rw,
             #[cfg(feature = "usb_log")]
@@ -287,6 +323,8 @@ impl<D: Driver<'static>> Runnable for UsbTransport<D> {
             other_writer,
             #[cfg(feature = "steno")]
             steno_writer,
+            #[cfg(feature = "ptp")]
+            trackpad_writer,
         );
         let writer_task = writer.run_writer();
 
@@ -403,6 +441,39 @@ macro_rules! add_usb_reader_writer {
     }};
 }
 
+#[cfg(feature = "ptp")]
+macro_rules! add_trackpad_usb_writer {
+    ($usb_builder:expr, $id:expr) => {{
+        // TrackpadDescriptor returns a `&'static [u8]` populated by
+        // `install_trackpad_descriptor` (which the macro-generated
+        // initializer calls before USB enumeration). The handler holds
+        // this trackpad's id so its mode-feature writes hit the right
+        // slot in `TRACKPAD_MODES`.
+        use ::usbd_hid::descriptor::SerializedDescriptor;
+        static TRACKPAD_HID_STATE: ::static_cell::StaticCell<::embassy_usb::class::hid::State> =
+            ::static_cell::StaticCell::new();
+        static TRACKPAD_REQUEST_HANDLER: ::static_cell::StaticCell<
+            $crate::input_device::trackpad_hid::TrackpadRequestHandler,
+        > = ::static_cell::StaticCell::new();
+        let state = TRACKPAD_HID_STATE.init(::embassy_usb::class::hid::State::new());
+        let request_handler =
+            TRACKPAD_REQUEST_HANDLER.init($crate::input_device::trackpad_hid::TrackpadRequestHandler::new($id));
+        let hid_config = ::embassy_usb::class::hid::Config {
+            report_descriptor: <$crate::input_device::trackpad_hid::TrackpadDescriptor as SerializedDescriptor>::desc(),
+            request_handler: Some(request_handler),
+            poll_ms: 1,
+            max_packet_size: 64,
+            hid_subclass: ::embassy_usb::class::hid::HidSubclass::No,
+            hid_boot_protocol: ::embassy_usb::class::hid::HidBootProtocol::None,
+        };
+        let rw: ::embassy_usb::class::hid::HidWriter<_, { $crate::input_device::trackpad_hid::TRACKPAD_WRITER_BUF }> =
+            ::embassy_usb::class::hid::HidWriter::new($usb_builder, state, hid_config);
+        rw
+    }};
+}
+
+#[cfg(feature = "ptp")]
+pub(crate) use add_trackpad_usb_writer;
 #[cfg(feature = "usb_log")]
 pub(crate) use add_usb_logger;
 pub(crate) use add_usb_reader_writer;

@@ -208,6 +208,11 @@ pub enum Report {
     /// Plover HID stenography chord report
     #[cfg(feature = "steno")]
     StenoReport(StenoReport),
+    /// Trackpad HID report (legacy mouse or PTP touchpad), routed to the
+    /// dedicated trackpad USB interface. See
+    /// [`crate::input_device::trackpad_hid`].
+    #[cfg(feature = "ptp")]
+    TrackpadReport(crate::input_device::trackpad_hid::TrackpadReport),
 }
 
 impl AsInputReport for Report {
@@ -219,6 +224,8 @@ impl AsInputReport for Report {
             Report::SystemControlReport(r) => r.serialize(buffer),
             #[cfg(feature = "steno")]
             Report::StenoReport(r) => r.serialize(buffer),
+            #[cfg(feature = "ptp")]
+            Report::TrackpadReport(r) => r.serialize(buffer),
         }
     }
 }

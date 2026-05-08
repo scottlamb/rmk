@@ -223,6 +223,16 @@ zsa_voyager_bl = []
 ## the steno USB writer endpoint, and the `Action::Steno` variant.
 steno = ["rmk-types/steno"]
 
+## Enable per-trackpad HID interface: a separate USB interface, sibling
+## to the keyboard's composite interface, exposing a legacy Mouse TLC
+## (Report ID 0x01) and a Win8 Precision Touchpad TLC (Report ID 0x05)
+## plus the four PTP Feature reports. A `TrackpadHidProcessor` consumes
+## `TrackpadEvent`s from a configured trackpad driver (e.g. IQS5xx) and
+## emits whichever report the host's Input Mode (Feature 0x08) selected.
+## Default at boot is legacy mouse — so macOS, which doesn't bind PTP
+## natively, gets a working cursor + tap without a userspace helper.
+ptp = []
+
 ## Internal feature that indicates no USB is used, this feature will be auto-activated for some chips
 _no_usb = []
 

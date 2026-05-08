@@ -145,6 +145,31 @@ impl<P: PacketPool> HidWriterTrait for BleHidServer<'_, '_, '_, P> {
                 debug!("Steno chord dropped: Plover HID over BLE is not supported");
                 Ok(0)
             }
+            // Trackpad HID over BLE: deferred. Two plausible host paths
+            // exist — neither yet wired up here:
+            //
+            // 1. Standard HID-over-GATT (HOGP) report-map extension: the
+            //    BLE service's HID descriptor would need to advertise
+            //    the same Mouse + Touchpad TLCs as the USB interface and
+            //    a corresponding `report` characteristic per trackpad,
+            //    so a host that binds HOGP-PTP would treat the device
+            //    as a touchpad. Linux's hid-multitouch claims it works
+            //    over BLE in principle; not all hosts do.
+            // 2. A custom (non-HID) GATT characteristic that ships the
+            //    same wire bytes as the USB interface, paired with a
+            //    host-side companion that synthesises pointing events
+            //    — analogous to the USB
+            //    `macos-trackpad-companion` path. Less standards-y but
+            //    avoids HOGP descriptor compatibility issues.
+            //
+            // Until one of those lands, drop these reports silently so
+            // a USB-and-BLE keyboard's BLE side doesn't error on every
+            // chip cycle.
+            #[cfg(feature = "ptp")]
+            Report::TrackpadReport(_) => {
+                debug!("Trackpad HID dropped: not yet wired up over BLE");
+                Ok(0)
+            }
         }
     }
 }

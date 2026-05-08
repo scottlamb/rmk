@@ -14,6 +14,8 @@ pub mod pmw33xx;
 pub mod pmw3610;
 pub mod pointing;
 pub mod rotary_encoder;
+#[cfg(feature = "ptp")]
+pub mod trackpad_hid;
 
 /// The trait for input devices.
 ///

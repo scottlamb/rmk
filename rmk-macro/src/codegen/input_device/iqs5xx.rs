@@ -6,12 +6,13 @@ use super::Initializer;
 
 /// Expand IQS5xx device configuration.
 ///
-/// Returns (device initializers, processor initializers). The processor list
-/// is currently always empty: the driver publishes `TrackpadEvent` and the
-/// matching consumer (which translates to `PointingEvent` / a HID report)
-/// has not landed yet, so this codegen wires up only the device. Users who
-/// want a working pointer in the meantime can add a consumer in their app
-/// layer.
+/// Returns `(device initializers, processor initializers)`. The processor
+/// list is non-empty only on builds with `feature = "ptp"`, where each
+/// `[input_device.iqs5xx]` block also gets a `TrackpadHidProcessor` that
+/// publishes legacy-mouse / PTP HID reports on a dedicated USB interface.
+/// Without `ptp`, this codegen wires up only the device — there is no
+/// default pointer output in the upstream tree until the user adds their
+/// own consumer (or enables `ptp`).
 pub(crate) fn expand_iqs5xx_device(
     iqs5xx_config: Vec<Iqs5xxConfig>,
     chip: &ChipModel,
@@ -28,6 +29,7 @@ pub(crate) fn expand_iqs5xx_device(
     }
 
     let mut device_initializers = vec![];
+    let mut processor_initializers: Vec<Initializer> = vec![];
 
     for (idx, sensor) in iqs5xx_config.iter().enumerate() {
         let sensor_id = sensor.id.unwrap_or(0);
@@ -130,9 +132,63 @@ pub(crate) fn expand_iqs5xx_device(
             initializer: device_init,
             var_name: device_ident,
         });
+
+        // PTP-mode HID consumer: emits legacy-mouse or PTP-touchpad reports
+        // on a dedicated USB interface (`feature = "ptp"`). One processor
+        // per `[input_device.iqs5xx]` block; the descriptor install runs
+        // before USB enumeration via the processor's constructor side
+        // effect.
+        //
+        // Opt-in: only emit when the user provided panel dimensions
+        // (`physical_mm_x/y` + `logical_max_x/y`). Without those, the
+        // descriptor would advertise a 0-by-0 panel and the cursor delta
+        // scaling would degenerate, so it's better to leave the processor
+        // off entirely than to emit silently-broken HID. Users who don't
+        // want any HID output from this trackpad just leave the dimension
+        // fields unset (the default).
+        if sensor.physical_mm_x == 0
+            || sensor.physical_mm_y == 0
+            || sensor.logical_max_x == 0
+            || sensor.logical_max_y == 0
+        {
+            continue;
+        }
+        let processor_ident = format_ident!("{}_processor", sensor_name);
+        let slot_id: u8 = idx as u8;
+        let logical_max_x = sensor.logical_max_x;
+        let logical_max_y = sensor.logical_max_y;
+        let physical_mm_x = sensor.physical_mm_x;
+        let physical_mm_y = sensor.physical_mm_y;
+        let tap_max_dev_mm = sensor.tap_max_dev_mm;
+        let tap_time_ms = sensor.tap_time_ms;
+        let hold_time_ms = sensor.hold_time_ms;
+        let sensitivity = sensor.sensitivity;
+        let processor_init = quote! {
+            let #processor_ident = {
+                let dims = ::rmk::input_device::trackpad_hid::TrackpadDimensions::from_mm(
+                    #logical_max_x,
+                    #logical_max_y,
+                    #physical_mm_x,
+                    #physical_mm_y,
+                );
+                let params = ::rmk::input_device::trackpad_hid::TrackpadParams::from_mm(
+                    dims,
+                    #tap_max_dev_mm,
+                    #tap_time_ms,
+                    #hold_time_ms,
+                    #sensitivity,
+                );
+                let params = ::rmk::input_device::trackpad_hid::install_trackpad_descriptor(params);
+                ::rmk::input_device::trackpad_hid::TrackpadHidProcessor::new(#slot_id, params, &keymap)
+            };
+        };
+        processor_initializers.push(Initializer {
+            initializer: processor_init,
+            var_name: processor_ident,
+        });
     }
 
-    (device_initializers, Vec::new())
+    (device_initializers, processor_initializers)
 }
 
 /// Generate `bind_interrupts!` entries for the I²C peripherals used by IQS5xx

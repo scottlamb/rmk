@@ -6,11 +6,13 @@ trackpad modules.
 
 ::: note
 
-- Currently only relative single-finger cursor movement is reported. Gestures,
-  multi-finger absolute positions, pressure, area, and raw channel data are
-  read from the IC but not yet published as RMK events.
-- Scaling is not supported yet; cursor movements will likely feel fast and
-  imprecise.
+- A working pointer (cursor + tap + drag) ships behind the optional
+  `ptp` Cargo feature — see [HID output](#hid-output). Without `ptp`, the
+  driver still publishes `TrackpadEvent`s but emits no HID reports of its
+  own; you'd need to add a custom consumer.
+- Multi-finger absolute positions, pressure, and area are read from the
+  IC and surfaced through `TrackpadEvent`. Software scrolling on top of
+  that is not yet implemented.
 - An `RDY` (ready) pin is strongly recommended. Without it, the driver falls
   back to timed polling and may stall the I²C bus through clock-stretching if
   it polls mid-cycle. See [RDY vs polling](#rdy-vs-polling).
@@ -50,6 +52,26 @@ rdy = "PIN_15"
 # invert_x = true
 # invert_y = true
 # swap_xy = true
+
+# --- Required for `feature = "ptp"` HID output (see "HID output" below) ---
+# Panel physical extent in whole millimetres. Match what the trackpad
+# module's datasheet says.
+# physical_mm_x = 60
+# physical_mm_y = 90
+# Panel logical-coordinate maximums. The IQS5xx itself prints these on
+# the first boot — `(rx_channels - 1) * 256` for X and likewise for Y.
+# A TPS65-501b after `swap_xy` is 9 × 13 channels, so 2048 × 3072.
+# logical_max_x = 2048
+# logical_max_y = 3072
+
+# --- Optional knobs, all with sensible defaults ---
+# Tap / hold tuning (mm and ms).
+# tap_max_dev_mm = 2     # max start-to-now deviation that still counts as a tap
+# tap_time_ms = 150      # max duration that still counts as a tap
+# hold_time_ms = 450     # stationary 1-finger hold latches button 1 (drag)
+# Cursor sensitivity in mouse units per mm of finger motion (same
+# convention macos-trackpad-companion uses for its PTP cursor scale).
+# sensitivity = 25.0
 ```
 
 ### Split
@@ -68,50 +90,116 @@ name = ...
 For split keyboards the device runs on whichever side it's wired to; the
 matching `PointingProcessor` is generated on the central automatically.
 
+## HID output
+
+The `ptp` Cargo feature adds a dedicated USB HID interface for the
+trackpad — sibling to the keyboard's composite interface, so keyboard
+input keeps working independently. The interface exposes two reports
+sharing one Application Collection per type:
+
+- **Legacy mouse** (Report ID `0x01`): cursor + integrated button. The
+  default at boot. macOS, which does not natively bind PTP, stays in
+  this mode and gets a working cursor + tap + drag without any
+  userspace helper.
+- **PTP touchpad** (Report ID `0x05`) plus the four spec-mandated
+  Feature reports. The host opts in by writing Input Mode = 3 to
+  Feature `0x08` (Linux's `hid-multitouch` does this on bind; Windows
+  needs the PTPHQA certification blob in the descriptor before it will
+  bind, which v1 does not include).
+
+To enable, add `ptp` to your build's `rmk` feature list and provide the
+panel parameters in your `[[input_device.iqs5xx]]` block:
+
+```toml
+[[input_device.iqs5xx]]
+name = "trackpad0"
+i2c.instance = "I2C0"
+i2c.sda = "PIN_4"
+i2c.scl = "PIN_5"
+rdy = "PIN_15"
+
+physical_mm_x = 60
+physical_mm_y = 90
+logical_max_x = 2048
+logical_max_y = 3072
+```
+
+The processor is generated automatically — no Rust glue required, the
+`#[rmk_keyboard]` macro wires it up when those four panel fields are set.
+Cursor scaling is configurable; see the TOML snippet above.
+
+### Tap and drag
+
+In legacy-mouse mode the firmware's tap/hold state machine maps
+finger-count transitions to button events:
+
+- 1-finger tap (touch < `tap_time_ms`, deviation ≤ `tap_max_dev_mm`):
+  emits a button-1 click pulse.
+- 2-finger tap: button-2 click pulse.
+- 1-finger stationary touch held ≥ `hold_time_ms`: latches button 1
+  for the rest of the session, with subsequent finger motion emitted as
+  cursor deltas — i.e. drag.
+
+Keymap-pressed `MouseBtn1..8` keys still go to the keyboard's composite
+mouse report. A follow-up commit lets you route them through a trackpad
+HID interface so a `MouseBtn1` held while a finger moves on the surface
+reads as a drag (the click and the contact then live on the same HID
+device, which is the precondition for drag detection on macOS /
+Windows).
+
+::: note
+
+The trackpad-HID processor must run on the **central** side, even if
+the trackpad is wired to a peripheral. The peripheral runs the `Iqs5xx`
+device and forwards events over the split link; the central converts
+them to USB HID reports.
+
+:::
+
 ## Rust configuration
 
-Construct the device directly. For a split keyboard, add the device to whichever
-side (`central.rs` or `peripheral.rs`) the trackpad is physically wired to.
+If you're not using `keyboard.toml`, construct the device + processor
+directly. For a split keyboard, run the device on whichever side the
+trackpad is wired to and the processor on the central.
 
 ```rust
 use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::i2c::{Config, I2c};
-use rmk::input_device::iqs5xx::Iqs5xx;
-use rmk::input_device::pointing::{PointingProcessor, PointingProcessorConfig};
+use rmk::input_device::iqs5xx::{Iqs5xx, Iqs5xxConfig};
+use rmk::input_device::trackpad_hid::{
+    install_trackpad_descriptor,
+    TrackpadDimensions, TrackpadHidProcessor, TrackpadParams,
+};
 
 // 1. Bring up the I2C bus the trackpad is on.
 let mut i2c_cfg = Config::default();
 i2c_cfg.frequency = 400_000;
 let i2c = I2c::new_async(p.I2C0, p.PIN_5, p.PIN_4, Irqs, i2c_cfg);
-
-// 2. Configure the RDY pin (recommended). Use `None` if you don't have one.
 let rdy = Some(Input::new(p.PIN_15, Pull::None));
 
-// 3. Construct the device. The first argument is an RMK pointing-device id;
-//    pick any 0-255, just don't reuse it for another pointing device.
+// 2. Construct the device.
 const POINTING_DEV_ID: u8 = 0;
-let mut trackpad = Iqs5xx::new(POINTING_DEV_ID, i2c, rdy);
+let mut trackpad = Iqs5xx::new(
+    POINTING_DEV_ID,
+    i2c,
+    rdy,
+    Iqs5xxConfig::default(),
+);
 
-// 4. Add a PointingProcessor on the central side to convert motion events
-//    into mouse reports. Axis tweaks (invert / swap) live here.
-let proc_config = PointingProcessorConfig {
-    // invert_x: true,
-    // invert_y: true,
-    // swap_xy: true,
-    ..Default::default()
-};
-let mut trackpad_proc = PointingProcessor::new(&keymap, proc_config);
+// 3. Install the descriptor + construct the processor (central only).
+//    Slot 0 is the only slot wired through USB right now.
+const TRACKPAD_SLOT: u8 = 0;
+let dims = TrackpadDimensions::from_mm(2048, 3072, 60, 90);
+let params = TrackpadParams::from_mm(dims, 2, 150, 450, 3, 5);
+let params = install_trackpad_descriptor(params);
+let mut trackpad_proc = TrackpadHidProcessor::new(TRACKPAD_SLOT, params, &keymap);
 
 run_all!(trackpad, trackpad_proc, /* matrix, ... */);
 ```
 
-::: note
-
-`PointingProcessor` must run on the **central** side, even if the trackpad is
-wired to a peripheral. The peripheral runs the `Iqs5xx` device and forwards
-events over the split link; the central converts them to USB/BLE HID reports.
-
-:::
+`install_trackpad_descriptor` must run before USB enumeration (i.e.
+before `rmk.run().await`); it stashes the report descriptor for the HID
+class to pick up at enumeration time.
 
 ## RDY vs polling
 
