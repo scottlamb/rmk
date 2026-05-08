@@ -56,6 +56,7 @@ use crate::config::PositionalConfig;
 #[cfg(feature = "_ble")]
 pub mod ble;
 pub mod boot;
+pub mod builder;
 pub mod channel;
 pub mod config;
 pub mod core_traits;

@@ -1,5 +1,6 @@
 pub(crate) mod action_parser;
 pub(crate) mod behavior;
+pub(crate) mod central_builder;
 pub(crate) mod chip;
 pub(crate) mod display;
 pub(crate) mod entry;

@@ -230,6 +230,19 @@ pub struct UsbTransport<D: Driver<'static>> {
 
 impl<D: Driver<'static>> UsbTransport<D> {
     pub fn new(driver: D, device_config: DeviceConfig<'static>) -> Self {
+        Self::new_with_extend(driver, device_config, |_: &mut Builder<'static, D>| {})
+    }
+
+    /// Construct a `UsbTransport` and run the supplied callback on the
+    /// underlying [`embassy_usb::Builder`] after RMK has registered its
+    /// own HID interfaces but before `Builder::build()`. Lets user code
+    /// add vendor reset interfaces, debug CDCs, custom HIDs — anything
+    /// that needs to ride alongside RMK's own USB stack.
+    pub fn new_with_extend<F: FnOnce(&mut Builder<'static, D>)>(
+        driver: D,
+        device_config: DeviceConfig<'static>,
+        extend: F,
+    ) -> Self {
         // nRF chips don't have a stable USB serial number unless one is derived
         // from the FICR. Override here so user code doesn't have to know.
         #[cfg(feature = "_nrf_ble")]
@@ -264,6 +277,11 @@ impl<D: Driver<'static>> UsbTransport<D> {
         let host_rw = add_usb_reader_writer!(&mut builder, ViaReport, 32, 32, 32);
         #[cfg(feature = "usb_log")]
         let logger = Some(add_usb_logger!(&mut builder));
+
+        // User-supplied extension runs after RMK's own classes so any
+        // descriptor budget arithmetic the user does is over what RMK
+        // already consumed.
+        extend(&mut builder);
 
         let (keyboard_reader, keyboard_writer) = keyboard_rw.split();
         let device = builder.build();

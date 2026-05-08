@@ -10,6 +10,7 @@ use darling::ast::NestedMeta;
 use proc_macro::TokenStream;
 use syn::parse_macro_input;
 
+use crate::codegen::central_builder::{expand_central_init, expand_central_setup, expand_peripheral_init};
 use crate::codegen::parse_keyboard_mod;
 
 #[proc_macro_attribute]
@@ -57,6 +58,39 @@ pub fn rmk_peripheral(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn runnable_generated(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item // Pass through unchanged
+}
+
+/// Function-style macro that pre-populates an [`rmk::builder::Rmk`] from
+/// `keyboard.toml`. Companion to the new builder API: the user writes
+/// their own `fn main()`, calls `central_init!()` to fill in everything
+/// `keyboard.toml` describes, and is free to layer on `.with_*()` calls
+/// for things outside the toml's reach.
+///
+/// Status: minimum-viable implementation covering RP2040 + split-central
+/// + USB-only. Other chips / configurations follow the same pattern but
+/// haven't been wired up yet — tracked for the upstream conversation.
+#[proc_macro]
+pub fn central_init(input: TokenStream) -> TokenStream {
+    expand_central_init(input.into()).into()
+}
+
+/// Module-scope companion to [`central_init!`]. Emits the items that
+/// have to live at module scope: matrix shape constants,
+/// `get_default_keymap` / `get_default_encoder_map`, `VIAL_*` statics,
+/// and `bind_interrupts!(struct Irqs { … })`. Together they replace the
+/// hand-written `keymap.rs` + `bind_interrupts!` boilerplate.
+#[proc_macro]
+pub fn central_setup(input: TokenStream) -> TokenStream {
+    expand_central_setup(input.into()).into()
+}
+
+/// Function-style macro for the peripheral half. Reads `keyboard.toml`,
+/// emits the matrix pin extraction + bootmagic + `Matrix::new`, the
+/// split UART, and exposes `matrix` and the lowercased UART instance
+/// ident as let-bindings the caller's `main()` joins externally.
+#[proc_macro]
+pub fn peripheral_init(input: TokenStream) -> TokenStream {
+    expand_peripheral_init(input.into()).into()
 }
 
 /// Derive macro for multi-event enums that generates automatic event dispatch.
