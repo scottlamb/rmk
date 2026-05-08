@@ -71,6 +71,18 @@ events = [
     { name = "connection_status_change", count = 2 },
 ]
 
+# --- PTP-gated internal subscribers ---
+
+[[subscriber]]
+features = ["ptp"]
+events = [
+    # input_device/trackpad_hid.rs: TrackpadHidProcessor subscribes
+    # to MouseButtonsEvent so a keymap-pressed mouse button held while
+    # no chip cycle is in flight still surfaces on the trackpad
+    # interface (drag-with-key, between-cycle clicks).
+    { name = "mouse_buttons" },
+]
+
 # --- Split + BLE-gated internal subscribers ---
 
 [[subscriber]]

@@ -56,8 +56,9 @@ pub use action::ActionEvent;
 pub use battery::{BatteryAdcEvent, BatteryStatusEvent, ChargingStateEvent};
 pub use connection::{ConnectionStatus, ConnectionStatusChangeEvent, ConnectionType};
 pub use input::{
-    Axis, AxisEvent, AxisValType, KeyPos, KeyboardEvent, KeyboardEventPos, ModifierEvent, PointingEvent,
-    PointingSetCpiEvent, RotaryEncoderPos, TRACKPAD_MAX_FINGERS, TrackpadEvent, TrackpadFinger, TrackpadFingers,
+    Axis, AxisEvent, AxisValType, KeyPos, KeyboardEvent, KeyboardEventPos, ModifierEvent, MouseButtonsEvent,
+    PointingEvent, PointingSetCpiEvent, RotaryEncoderPos, TRACKPAD_MAX_FINGERS, TrackpadEvent, TrackpadFinger,
+    TrackpadFingers,
 };
 #[cfg(feature = "split")]
 pub use split::{CentralConnectedEvent, PeripheralConnectedEvent};

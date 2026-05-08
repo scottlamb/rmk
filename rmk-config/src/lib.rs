@@ -376,6 +376,7 @@ define_event_config!(
     connection_status_change,
     // Input events
     modifier,
+    mouse_buttons,
     keyboard,
     // Keyboard state events
     layer_change,
@@ -860,6 +861,32 @@ pub struct InputDeviceConfig {
     pub pmw3610: Option<Vec<Pmw3610Config>>,
     pub pmw33xx: Option<Vec<Pmw33xxConfig>>,
     pub iqs5xx: Option<Vec<Iqs5xxConfig>>,
+    /// Where keymap-pressed `MouseBtn1..3` keys go (only meaningful with
+    /// `feature = "ptp"`). Default: composite keyboard mouse report.
+    pub mouse_button_routing: Option<MouseButtonRoutingConfig>,
+}
+
+/// Routing for keymap-pressed `MouseBtn1..3` keys when the firmware is
+/// built with `feature = "ptp"`. By default these keys appear on the
+/// keyboard's composite mouse report (the same place mouse-keys-style
+/// cursor movement goes). Set `[input_device.mouse_button_routing]`'s
+/// `trackpad` field to the `name` of an `[[input_device.iqs5xx]]` block
+/// to redirect them to that trackpad's HID interface — the click and
+/// the contact then live on the same HID device, which is what macOS /
+/// Windows look for when deciding whether finger-motion + button-held
+/// is a drag.
+///
+/// Single-destination: there's no list form, because sending the same
+/// button to multiple HID devices simultaneously risks click-coalescing
+/// on macOS. Buttons 4..8 always go to composite (the touchpad TLC
+/// declares only one integrated button, and the legacy mouse TLC three).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MouseButtonRoutingConfig {
+    /// Name of an `[[input_device.iqs5xx]]` block, or unset for default
+    /// (composite). The codegen resolves the name to the matching slot
+    /// at build time.
+    pub trackpad: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

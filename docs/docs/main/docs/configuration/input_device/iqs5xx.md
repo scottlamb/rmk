@@ -128,7 +128,7 @@ The processor is generated automatically — no Rust glue required, the
 `#[rmk_keyboard]` macro wires it up when those four panel fields are set.
 Cursor scaling is configurable; see the TOML snippet above.
 
-### Tap and drag
+### Tap, drag, mouse-button routing
 
 In legacy-mouse mode the firmware's tap/hold state machine maps
 finger-count transitions to button events:
@@ -140,12 +140,46 @@ finger-count transitions to button events:
   for the rest of the session, with subsequent finger motion emitted as
   cursor deltas — i.e. drag.
 
-Keymap-pressed `MouseBtn1..8` keys still go to the keyboard's composite
-mouse report. A follow-up commit lets you route them through a trackpad
-HID interface so a `MouseBtn1` held while a finger moves on the surface
-reads as a drag (the click and the contact then live on the same HID
-device, which is the precondition for drag detection on macOS /
-Windows).
+For "drag with a key" — holding a keymap-bound `MouseBtn1` while moving
+a finger on the trackpad — set the global routing target to a trackpad
+by name. Same convention as the `[[input_device.iqs5xx]]` block: top
+level for unibody, under `[split.central.input_device]` for split:
+
+```toml
+# Unibody:
+[input_device.mouse_button_routing]
+trackpad = "trackpad0"   # the `name` of an [[input_device.iqs5xx]] block
+
+# Split keyboard:
+[split.central.input_device.mouse_button_routing]
+trackpad = "trackpad0"   # name of an [[…input_device.iqs5xx]] anywhere in the tree
+```
+
+The named iqs5xx can sit on either half — the resolver walks both
+central and peripheral configs and assigns slot ids in emission order.
+A typo in the name fires `compile_error!` at build time rather than
+silently leaving routing off.
+
+Keymap-pressed mouse buttons (`MouseBtn1..3`) then feed that trackpad's
+HID interface and are suppressed on the keyboard's composite mouse
+report, so the host sees one HID device's finger and button moving
+together (the precondition for drag detection on macOS / Windows).
+With the field unset, keymap mouse buttons go to the composite mouse
+report as before, which is appropriate for plain "mouse keys" use
+without a trackpad.
+
+Single-destination by design: there's no list form. Sending the same
+button to two HID devices simultaneously can produce ghost double-clicks
+on macOS (the per-event-type click-counter doesn't distinguish source
+devices). If you have multiple trackpads and want the routed buttons on
+more than one, that's a feature for a future commit; the current
+runtime only wires up one trackpad HID interface anyway.
+
+A keymap-pressed `MouseBtn1` with no finger on the surface still
+surfaces immediately: the trackpad processor subscribes to
+`MouseButtonsEvent` and emits a button-only report on the transition.
+This matters for event-mode trackpads (e.g. IQS5xx with `RDY`), which
+otherwise produce no chip cycle while the surface is idle.
 
 ::: note
 
@@ -167,7 +201,7 @@ use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::i2c::{Config, I2c};
 use rmk::input_device::iqs5xx::{Iqs5xx, Iqs5xxConfig};
 use rmk::input_device::trackpad_hid::{
-    install_trackpad_descriptor,
+    install_trackpad_descriptor, set_mouse_button_destination,
     TrackpadDimensions, TrackpadHidProcessor, TrackpadParams,
 };
 
@@ -192,6 +226,9 @@ const TRACKPAD_SLOT: u8 = 0;
 let dims = TrackpadDimensions::from_mm(2048, 3072, 60, 90);
 let params = TrackpadParams::from_mm(dims, 2, 150, 450, 3, 5);
 let params = install_trackpad_descriptor(params);
+// Optional: route keymap MouseBtn1..3 to this trackpad's HID interface
+// (i.e. drag-with-a-key). Defaults to `None` (composite).
+set_mouse_button_destination(Some(TRACKPAD_SLOT));
 let mut trackpad_proc = TrackpadHidProcessor::new(TRACKPAD_SLOT, params, &keymap);
 
 run_all!(trackpad, trackpad_proc, /* matrix, ... */);
@@ -199,7 +236,9 @@ run_all!(trackpad, trackpad_proc, /* matrix, ... */);
 
 `install_trackpad_descriptor` must run before USB enumeration (i.e.
 before `rmk.run().await`); it stashes the report descriptor for the HID
-class to pick up at enumeration time.
+class to pick up at enumeration time. `set_mouse_button_destination`
+flips a global atomic, so it can be called any time before the first
+`MouseBtn1..3` press.
 
 ## RDY vs polling
 

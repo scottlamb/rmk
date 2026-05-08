@@ -1,6 +1,6 @@
 use adc::expand_adc_device;
 use encoder::expand_encoder_device;
-use iqs5xx::expand_iqs5xx_device;
+use iqs5xx::{expand_iqs5xx_device, expand_mouse_button_routing};
 use pmw33xx::expand_pmw33xx_device;
 use pmw3610::expand_pmw3610_device;
 use proc_macro2::{Ident, TokenStream};
@@ -243,22 +243,56 @@ pub(crate) fn expand_input_device_config(
         }
     }
 
-    // generate IQS5xx configuration
-    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) = match board {
+    // Generate IQS5xx configuration. The mouse-button-routing destination
+    // (if set) is read from the central's `[input_device]` block and
+    // resolved against every iqs5xx the firmware will instantiate —
+    // central + every peripheral — by name. Slot ids are assigned in
+    // emission order: central iqs5xxs first, then each peripheral's in
+    // turn.
+    let (central_iqs5xx_configs, routing_target_name): (Vec<_>, Option<String>) = match board {
         BoardConfig::UniBody(UniBodyConfig { input_device, .. }) => {
-            expand_iqs5xx_device(input_device.clone().iqs5xx.unwrap_or(Vec::new()), chip)
+            let configs = input_device.clone().iqs5xx.unwrap_or_default();
+            let routing = input_device
+                .mouse_button_routing
+                .as_ref()
+                .and_then(|r| r.trackpad.clone());
+            (configs, routing)
         }
-        BoardConfig::Split(split_config) => expand_iqs5xx_device(
-            split_config
+        BoardConfig::Split(split_config) => {
+            let central_input = split_config
                 .central
                 .input_device
                 .clone()
-                .unwrap_or(InputDeviceConfig::default())
-                .iqs5xx
-                .unwrap_or(Vec::new()),
-            chip,
-        ),
+                .unwrap_or(InputDeviceConfig::default());
+            let routing = central_input.mouse_button_routing.as_ref().and_then(|r| r.trackpad.clone());
+            (central_input.iqs5xx.unwrap_or_default(), routing)
+        }
     };
+
+    // Build the (name, slot id) pairing for every iqs5xx the firmware
+    // will instantiate. Slot ids are assigned in emission order.
+    let mut iqs5xx_slots: Vec<(String, u8)> = Vec::new();
+    for sensor in &central_iqs5xx_configs {
+        let id = iqs5xx_slots.len() as u8;
+        iqs5xx_slots.push((sensor.name.clone(), id));
+    }
+    if let BoardConfig::Split(split_config) = board {
+        for peripheral in &split_config.peripheral {
+            let configs = peripheral
+                .input_device
+                .as_ref()
+                .and_then(|id| id.iqs5xx.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            for sensor in &configs {
+                let id = iqs5xx_slots.len() as u8;
+                iqs5xx_slots.push((sensor.name.clone(), id));
+            }
+        }
+    }
+
+    let (iqs5xx_device_initializers, iqs5xx_processor_initializers) =
+        expand_iqs5xx_device(central_iqs5xx_configs, chip);
 
     for initializer in iqs5xx_device_initializers {
         initialization.extend(initializer.initializer);
@@ -283,9 +317,8 @@ pub(crate) fn expand_input_device_config(
                 .iqs5xx
                 .unwrap_or(Vec::new());
 
-            // Only generate processors (not devices) for peripheral IQS5xx
-            let (_, peripheral_iqs5xx_processors) =
-                expand_iqs5xx_device(peripheral_iqs5xx_config, chip);
+            // Only generate processors (not devices) for peripheral IQS5xx.
+            let (_, peripheral_iqs5xx_processors) = expand_iqs5xx_device(peripheral_iqs5xx_config, chip);
 
             for initializer in peripheral_iqs5xx_processors {
                 initialization.extend(initializer.initializer);
@@ -294,6 +327,16 @@ pub(crate) fn expand_input_device_config(
             }
         }
     }
+
+    // Mouse-button routing setup. Emits a one-shot
+    // `set_mouse_button_destination(Some(id))` (or compile_error! on a
+    // misnamed target) before USB enumeration. Resolved against the
+    // combined slot list above so a peripheral-side iqs5xx is reachable
+    // by name from the central's TOML.
+    initialization.extend(expand_mouse_button_routing(
+        routing_target_name.as_deref(),
+        &iqs5xx_slots,
+    ));
 
     (initialization, devices, processors)
 }

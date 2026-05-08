@@ -13,6 +13,13 @@ use super::Initializer;
 /// Without `ptp`, this codegen wires up only the device — there is no
 /// default pointer output in the upstream tree until the user adds their
 /// own consumer (or enables `ptp`).
+///
+/// Routing of keymap-pressed mouse buttons (the
+/// `[input_device.mouse_button_routing.trackpad]` field) is *not*
+/// resolved here — the slot id depends on whether the iqs5xx is on the
+/// central or a peripheral, and only the caller knows that. Callers
+/// build a slot list across all halves and pass it through
+/// [`expand_mouse_button_routing`] separately.
 pub(crate) fn expand_iqs5xx_device(
     iqs5xx_config: Vec<Iqs5xxConfig>,
     chip: &ChipModel,
@@ -189,6 +196,49 @@ pub(crate) fn expand_iqs5xx_device(
     }
 
     (device_initializers, processor_initializers)
+}
+
+/// Resolve the user's `[input_device.mouse_button_routing.trackpad]`
+/// against a slot list and emit the resulting
+/// `set_mouse_button_destination(...)` call.
+///
+/// `slots` is the (name, slot id) pairing across every iqs5xx the
+/// firmware will instantiate — central + every peripheral, in
+/// emission order. The caller decides what slot id corresponds to
+/// each iqs5xx (matching the `id` it passes to
+/// `TrackpadHidProcessor::new`).
+///
+/// * `target_name` unset → empty token stream (no setup call; the
+///   static defaults to ROUTE_TO_COMPOSITE).
+/// * `target_name` matches a slot → `set_mouse_button_destination(Some(id))`.
+/// * `target_name` set but doesn't match any slot → `compile_error!`
+///   token. Silent fallback would let typos in `keyboard.toml` ship
+///   firmware with the wrong routing destination.
+pub(crate) fn expand_mouse_button_routing(target_name: Option<&str>, slots: &[(String, u8)]) -> TokenStream {
+    let Some(target) = target_name else {
+        return quote! {};
+    };
+    match slots.iter().find(|(name, _)| name == target) {
+        Some((_, id)) => {
+            let id = *id;
+            quote! {
+                ::rmk::input_device::trackpad_hid::set_mouse_button_destination(
+                    ::core::option::Option::Some(#id),
+                );
+            }
+        }
+        None => {
+            let known: Vec<&str> = slots.iter().map(|(n, _)| n.as_str()).collect();
+            let msg = format!(
+                "[input_device.mouse_button_routing.trackpad] = \"{}\" \
+                 does not match any [[input_device.iqs5xx]] name. Known names: {:?}",
+                target, known,
+            );
+            quote! {
+                ::core::compile_error!(#msg);
+            }
+        }
+    }
 }
 
 /// Generate `bind_interrupts!` entries for the I²C peripherals used by IQS5xx

@@ -60,12 +60,25 @@
 //! cross-controller story (no Cirque/maxtouch equivalent), and a software
 //! 2-finger scroll detector lands in a follow-up.
 //!
-//! Keymap-driven `MouseBtn{1..8}` presses are not surfaced through this
-//! interface in this commit; they continue to feed the keyboard's
-//! composite mouse report. A follow-up commit ("route keymap mouse
-//! buttons through trackpad HID for drag-with-key") wires that up so a
-//! `MouseBtn1` held while a finger moves on the surface reads as a drag
-//! on macOS / Windows.
+//! # Mouse-button routing
+//!
+//! By default the keymap's `MouseBtn{1..8}` keys feed the keyboard's
+//! composite mouse report. When the keyboard config sets
+//! `[input_device.mouse_button_routing].trackpad` to a trackpad's name,
+//! the codegen calls [`set_mouse_button_destination`] before USB
+//! enumeration; the composite path then zeros the buttons and the
+//! matching trackpad's processor OR's `keymap.mouse_buttons() & 0x07`
+//! into its own report's button bits — so a key bound to `MouseBtn1`
+//! held while a finger moves on the surface produces a drag, since
+//! both the contact and the button live on the same HID device. Bits
+//! 3..=7 of `mouse_buttons()` are dropped (both touchpad TLCs declare
+//! Buttons 1..=3).
+//!
+//! The processor also subscribes to [`MouseButtonsEvent`] so a routed
+//! press / release that lands between chip cycles surfaces
+//! immediately — without it, an event-mode IQS5xx with no finger on
+//! the surface would never produce a chip cycle, and the click would
+//! be silently dropped.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -80,7 +93,7 @@ use usbd_hid::descriptor::{AsInputReport, BufferOverflow, SerializedDescriptor};
 
 use crate::RawMutex;
 use crate::channel::USB_REPORT_CHANNEL;
-use crate::event::{TRACKPAD_MAX_FINGERS, TrackpadEvent, TrackpadFinger};
+use crate::event::{MouseButtonsEvent, TRACKPAD_MAX_FINGERS, TrackpadEvent, TrackpadFinger};
 use crate::hid::Report;
 use crate::keymap::KeyMap;
 
@@ -282,6 +295,46 @@ pub static TRACKPAD_MODES: [AtomicU8; MAX_TRACKPADS] = [
     AtomicU8::new(MODE_LEGACY),
 ];
 
+/// Sentinel for [`MOUSE_BUTTON_DESTINATION_TRACKPAD`]: the keymap's
+/// `MouseBtn1..3` keys go to the keyboard's composite mouse report,
+/// not to any trackpad.
+const ROUTE_TO_COMPOSITE: u8 = u8::MAX;
+
+/// Single global "where do keymap mouse-button keys land?" knob. Holds
+/// the trackpad id (0..[`MAX_TRACKPADS`]) of the trackpad whose HID
+/// interface should carry keymap-pressed `MouseBtn1..3` keys, or
+/// [`ROUTE_TO_COMPOSITE`] for the default (composite mouse report).
+/// Single-destination by design: sending the same button to two HID
+/// devices simultaneously risks click-coalescing on macOS.
+static MOUSE_BUTTON_DESTINATION_TRACKPAD: AtomicU8 = AtomicU8::new(ROUTE_TO_COMPOSITE);
+
+/// Set the global mouse-button routing destination. Pass `Some(id)` to
+/// route keymap-pressed `MouseBtn1..3` to the trackpad with id `id`'s
+/// HID interface; pass `None` for the default (composite mouse
+/// report). Intended for the macro-generated init path; user code
+/// should configure this via `[input_device.mouse_button_routing]` in
+/// TOML rather than calling this directly.
+pub fn set_mouse_button_destination(target: Option<u8>) {
+    let v = match target {
+        Some(id) if (id as usize) < MAX_TRACKPADS => id,
+        _ => ROUTE_TO_COMPOSITE,
+    };
+    MOUSE_BUTTON_DESTINATION_TRACKPAD.store(v, Ordering::Relaxed);
+}
+
+/// True iff the composite mouse-report path should drop mouse-button
+/// bits (because they go to a trackpad interface). Used by `keyboard.rs`.
+pub fn composite_should_suppress_mouse_buttons() -> bool {
+    MOUSE_BUTTON_DESTINATION_TRACKPAD.load(Ordering::Relaxed) != ROUTE_TO_COMPOSITE
+}
+
+/// True iff the global routing destination is the trackpad with this
+/// `id`. Used by [`TrackpadHidProcessor`] to decide whether to OR
+/// keymap mouse buttons into its own report's button bits.
+fn destination_matches(id: u8) -> bool {
+    MOUSE_BUTTON_DESTINATION_TRACKPAD.load(Ordering::Relaxed) == id
+}
+
 // ============================================================================
 // HID descriptor
 // ============================================================================
@@ -394,8 +447,15 @@ fn write_trackpad_descriptor(buf: &mut [u8], dims: TrackpadDimensions) -> usize 
         0x27, 0xFF, 0xFF, 0x00, 0x00, // Logical Maximum (65535)
         0x75, 0x10, 0x95, 0x01, 0x09, 0x56, 0x81, 0x02, // Contact Count (8 bits)
         0x09, 0x54, 0x25, 0x05, 0x95, 0x01, 0x75, 0x08, 0x81, 0x02, 0x55, 0x00, 0x65, 0x00, // reset units
-        // Integrated touchpad button (1 bit + 7 pad)
-        0x05, 0x09, 0x09, 0x01, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02, 0x95, 0x07, 0x81, 0x03,
+        // Buttons 1..=3 (3 bits + 5 pad). Microsoft's PTP spec defines
+        // Button 1 as the integrated touchpad button, Buttons 2 and 3 as
+        // external primary/secondary clickers; we expose all three so
+        // keymap-routed `MouseBtn{1,2,3}` keys land on the same HID
+        // device as touch contacts. Declaring three Button-page usages
+        // also breaks Linux's `hid-multitouch` auto-buttonpad heuristic
+        // (which fires when a multitouch-pointer TLC has exactly one
+        // button) — see the Pad Type override below.
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03, 0x81, 0x02, 0x95, 0x05, 0x81, 0x03,
         // Feature: Device Capabilities (Report ID 0x07) — max_contacts low nibble, pad_type high nibble
         0x05, 0x0D, 0x85, 0x07, 0x09, 0x55, 0x09, 0x59, 0x75, 0x04, 0x95, 0x02, 0x25, 0x0F, 0xB1, 0x02,
         // Feature: Latency Mode (Report ID 0x06)
@@ -621,8 +681,14 @@ impl RequestHandler for TrackpadRequestHandler {
             // Device Capabilities: max_contacts in low nibble, pad_type
             // in high nibble. Pad Type 2 = "Non-Clickable / Discrete-pad"
             // matches the IQS5xx surface — rigid, no integrated mechanical
-            // click — and avoids one branch of Linux hid-multitouch's
-            // auto-buttonpad detection (`BUTTONTYPE == CLICKPAD`).
+            // click; clicks come from the keymap-routed Mouse buttons.
+            // Together with declaring Buttons 1..=3 (instead of just
+            // Button 1) in the touchpad TLC, this defeats both branches
+            // of Linux hid-multitouch's auto-buttonpad detection
+            // (`buttons_count == 1` and `BUTTONTYPE == CLICKPAD`), so
+            // `INPUT_PROP_BUTTONPAD` is not set and libinput's
+            // clickpad-only "click requires a finger on the surface"
+            // filter doesn't apply.
             ReportId::Feature(0x07) => (0x07, (2 << 4) | (TRACKPAD_MAX_CONTACTS & 0x0F)),
             // Input Mode mirrors the live atomic so a paranoid host can
             // verify its Set took.
@@ -714,7 +780,7 @@ impl TrackpadPtpReport {
         }
         buf[p..p + 2].copy_from_slice(&self.scan_time.to_le_bytes());
         buf[p + 2] = self.contact_count;
-        buf[p + 3] = self.button & 0b1;
+        buf[p + 3] = self.button & 0b111;
         Ok(p + 4)
     }
 }
@@ -799,12 +865,18 @@ struct LegacyState {
 impl LegacyState {
     /// Decode one [`TrackpadEvent`] into zero or more reports, pushing
     /// each into `out`. `now` is injected so tests can drive the
-    /// state machine through scripted timestamps.
+    /// state machine through scripted timestamps. `routed_buttons` is
+    /// the keymap-pressed `MouseBtn1..3` bitmap (masked) when this
+    /// trackpad is the global routing destination, otherwise 0; it's
+    /// OR'd into firmware-detected buttons so a `MouseBtn1` held while
+    /// the user drags reads as the same HID device's button + contact
+    /// moving together.
     fn process(
         &mut self,
         event: &TrackpadEvent,
         params: &TrackpadParams,
         now: Instant,
+        routed_buttons: u8,
         out: &mut heapless::Vec<TrackpadReport, MAX_OUTPUTS>,
     ) {
         // Count *live* contacts (`tip == true`). A lifted finger leaves a
@@ -903,26 +975,29 @@ impl LegacyState {
                         1 => 0b001,
                         _ => 0b010,
                     };
-                    // Press, then synthetic release.
-                    debug!("trackpad legacy: tap pulse btn={:#x}", btn);
-                    self.last_buttons_emitted = btn;
+                    // Press, then synthetic release. Routed bits travel
+                    // along on both edges so a "tap while holding btn1
+                    // from a key" still surfaces as a press-release pair.
+                    let pressed = btn | routed_buttons;
+                    debug!("trackpad legacy: tap pulse btn={:#x} routed={:#x}", btn, routed_buttons);
+                    self.last_buttons_emitted = pressed;
                     let _ = out.push(TrackpadReport::LegacyMouse(TrackpadLegacyMouseReport {
-                        buttons: btn,
+                        buttons: pressed,
                         x: 0,
                         y: 0,
                     }));
-                    self.last_buttons_emitted = 0;
+                    self.last_buttons_emitted = routed_buttons;
                     let _ = out.push(TrackpadReport::LegacyMouse(TrackpadLegacyMouseReport {
-                        buttons: 0,
+                        buttons: routed_buttons,
                         x: 0,
                         y: 0,
                     }));
                 } else if s.hold_latched {
-                    // Drag release.
-                    debug!("trackpad legacy: drag release");
-                    self.last_buttons_emitted = 0;
+                    // Drag release. Any still-held routed button stays.
+                    debug!("trackpad legacy: drag release routed={:#x}", routed_buttons);
+                    self.last_buttons_emitted = routed_buttons;
                     let _ = out.push(TrackpadReport::LegacyMouse(TrackpadLegacyMouseReport {
-                        buttons: 0,
+                        buttons: routed_buttons,
                         x: 0,
                         y: 0,
                     }));
@@ -936,10 +1011,11 @@ impl LegacyState {
         // Publish the *previous* frame's motion (one-cycle hold-back).
         // ~13 ms of cursor latency in exchange for not teleporting on
         // release.
-        let buttons = match &self.session {
+        let firmware_buttons = match &self.session {
             Some(s) if s.hold_latched => 0b001,
             _ => 0,
         };
+        let buttons = firmware_buttons | routed_buttons;
         if let Some((dx, dy)) = self.pending_motion.take() {
             self.last_buttons_emitted = buttons;
             let _ = out.push(TrackpadReport::LegacyMouse(TrackpadLegacyMouseReport {
@@ -960,6 +1036,32 @@ impl LegacyState {
         }
         self.pending_motion = new_motion;
     }
+
+    /// Surface a between-chip-cycle keymap-button transition. Emits a
+    /// movement-zero mouse report with the new buttons (firmware-latched
+    /// hold OR'd with routed) when it differs from what we last sent.
+    /// No-op when the buttons match the last emission — keeps the line
+    /// quiet on no-op events.
+    fn process_button_event(
+        &mut self,
+        routed_buttons: u8,
+        out: &mut heapless::Vec<TrackpadReport, MAX_OUTPUTS>,
+    ) {
+        let firmware_buttons = match &self.session {
+            Some(s) if s.hold_latched => 0b001,
+            _ => 0,
+        };
+        let buttons = firmware_buttons | routed_buttons;
+        if buttons == self.last_buttons_emitted {
+            return;
+        }
+        self.last_buttons_emitted = buttons;
+        let _ = out.push(TrackpadReport::LegacyMouse(TrackpadLegacyMouseReport {
+            buttons,
+            x: 0,
+            y: 0,
+        }));
+    }
 }
 
 /// PTP touchpad-mode state. Pure decoder, same shape as
@@ -967,9 +1069,9 @@ impl LegacyState {
 struct PtpState {
     /// Per-contact tracking, indexed by `contact_id`.
     contacts: [PtpContact; TRACKPAD_MAX_CONTACTS as usize],
-    /// Last button-byte emitted; held for the routing follow-up commit
-    /// to dedupe between-cycle button-only reports.
-    #[allow(dead_code)]
+    /// Last button-byte emitted. Lets [`Self::process_button_event`]
+    /// dedupe — if a chip cycle already carried the new state, no
+    /// separate button-only report is needed.
     last_button_emitted: u8,
 }
 
@@ -983,19 +1085,19 @@ impl Default for PtpState {
 }
 
 impl PtpState {
-    /// Decode one [`TrackpadEvent`] into one PTP report. The integrated
-    /// touchpad button is unused in this commit (firmware doesn't yet
-    /// have a software tap-to-click for PTP mode, and keymap-pressed
-    /// mouse buttons stay on the composite report). The routing
-    /// follow-up wires that up.
+    /// Decode one [`TrackpadEvent`] into one PTP report. `button` is
+    /// Buttons 1..=3 packed into the low 3 bits — typically
+    /// `routed_buttons & 0b111` from the keymap when this trackpad is
+    /// the routing destination, otherwise 0.
     fn process(
         &mut self,
         event: &TrackpadEvent,
         params: &TrackpadParams,
         now: Instant,
+        button: u8,
         out: &mut heapless::Vec<TrackpadReport, MAX_OUTPUTS>,
     ) {
-        let button = 0;
+        let button = button & 0b111;
         // Index live fingers by id so the per-slot walk pairs each
         // tracked id with its (possibly absent) live record in one pass.
         let mut cur: [Option<&TrackpadFinger>; TRACKPAD_MAX_CONTACTS as usize] = [None; TRACKPAD_MAX_CONTACTS as usize];
@@ -1048,25 +1150,65 @@ impl PtpState {
         self.last_button_emitted = button;
         let _ = out.push(TrackpadReport::Ptp(report));
     }
+
+    /// Surface a between-chip-cycle button transition. PTP wants the
+    /// host to see the *current* contact set on every report, even
+    /// when only the button changed — so this replays the live
+    /// contacts at their last known positions (zeroes them out for
+    /// any slot that's gone idle). Dedupes against
+    /// [`Self::last_button_emitted`] so identical buttons skip the
+    /// emission.
+    fn process_button_event(
+        &mut self,
+        params: &TrackpadParams,
+        now: Instant,
+        button: u8,
+        out: &mut heapless::Vec<TrackpadReport, MAX_OUTPUTS>,
+    ) {
+        let button = button & 0b111;
+        if button == self.last_button_emitted {
+            return;
+        }
+        let mut report = TrackpadPtpReport {
+            scan_time: scan_time_at(now),
+            button,
+            ..Default::default()
+        };
+        let mut next = 0;
+        for (id, c) in self.contacts.iter().enumerate() {
+            if c.active && next < report.fingers.len() {
+                report.fingers[next] = TrackpadPtpFinger {
+                    confidence: true,
+                    tip_switch: true,
+                    contact_id: id as u8,
+                    x: c.x.min(params.dims.logical_max_x),
+                    y: c.y.min(params.dims.logical_max_y),
+                };
+                next += 1;
+            }
+        }
+        report.contact_count = next as u8;
+        self.last_button_emitted = button;
+        let _ = out.push(TrackpadReport::Ptp(report));
+    }
 }
 
 /// Translates [`TrackpadEvent`] into HID reports on the trackpad
 /// interface. Thin async wrapper around the pure [`LegacyState`] /
 /// [`PtpState`] decoders, switching between them on the host's
 /// Input Mode (per-trackpad slot in [`TRACKPAD_MODES`]).
-#[processor(subscribe = [TrackpadEvent])]
+///
+/// Also subscribes to [`MouseButtonsEvent`] so a routed `MouseBtn1..3`
+/// press / release that lands between chip cycles surfaces
+/// immediately.
+#[processor(subscribe = [TrackpadEvent, MouseButtonsEvent])]
 pub struct TrackpadHidProcessor<'a> {
     /// 0..[`MAX_TRACKPADS`]. Indexes [`TRACKPAD_MODES`] for this
-    /// processor's mode. Must match the id passed to that interface's
-    /// [`TrackpadRequestHandler`].
+    /// processor's mode and is matched against the global routing
+    /// destination for keymap mouse-button injection. Must match the
+    /// id passed to that interface's [`TrackpadRequestHandler`].
     id: u8,
     params: TrackpadParams,
-    /// Held for forward-compatibility with the keymap-button routing
-    /// follow-up; not read in this commit. The lifetime parameter
-    /// lives here either way (the macro infrastructure expects it on
-    /// the processor) so threading it through `KeyMap` now keeps the
-    /// API stable across the split.
-    #[allow(dead_code)]
     keymap: &'a KeyMap<'a>,
     legacy: LegacyState,
     ptp: PtpState,
@@ -1092,17 +1234,52 @@ impl<'a> TrackpadHidProcessor<'a> {
         TRACKPAD_MODES[(self.id as usize).min(MAX_TRACKPADS - 1)].load(Ordering::Relaxed)
     }
 
+    /// Mouse-button bits to OR into this trackpad's report. Masked by
+    /// `mask` (`0b111` for both legacy mode's 3-button mouse TLC and
+    /// PTP's Buttons 1..=3). Returns 0 when the global routing
+    /// destination doesn't point at this trackpad.
+    fn routed_buttons(&self, mask: u8) -> u8 {
+        if destination_matches(self.id) {
+            self.keymap.mouse_buttons() & mask
+        } else {
+            0
+        }
+    }
+
     async fn on_trackpad_event(&mut self, event: TrackpadEvent) {
         let now = Instant::now();
         let mut out: heapless::Vec<TrackpadReport, MAX_OUTPUTS> = heapless::Vec::new();
         // Mode change resets the *other* mode's state so the first
         // frame after a flip is clean.
         if self.current_mode() == MODE_PTP {
-            self.ptp.process(&event, &self.params, now, &mut out);
+            self.ptp
+                .process(&event, &self.params, now, self.routed_buttons(0b111), &mut out);
             self.legacy = LegacyState::default();
         } else {
-            self.legacy.process(&event, &self.params, now, &mut out);
+            self.legacy
+                .process(&event, &self.params, now, self.routed_buttons(0b111), &mut out);
             self.ptp = PtpState::default();
+        }
+        for r in out {
+            send(r).await;
+        }
+    }
+
+    /// Surface a between-chip-cycle keymap-button transition through
+    /// this trackpad's HID interface. No-op when this trackpad isn't
+    /// the routing destination — there's nothing for the keymap-press
+    /// to feed.
+    async fn on_mouse_buttons_event(&mut self, _event: MouseButtonsEvent) {
+        if !destination_matches(self.id) {
+            return;
+        }
+        let now = Instant::now();
+        let mut out: heapless::Vec<TrackpadReport, MAX_OUTPUTS> = heapless::Vec::new();
+        if self.current_mode() == MODE_PTP {
+            self.ptp
+                .process_button_event(&self.params, now, self.routed_buttons(0b111), &mut out);
+        } else {
+            self.legacy.process_button_event(self.routed_buttons(0b111), &mut out);
         }
         for r in out {
             send(r).await;
@@ -1150,7 +1327,7 @@ mod tests {
         let mut buf = [0u8; 1024];
         let dims = TrackpadDimensions::from_mm(2048, 3072, 60, 90);
         let len = write_trackpad_descriptor(&mut buf, dims);
-        assert_eq!(len, 497);
+        assert_eq!(len, 499);
     }
 
     #[test]
@@ -1353,7 +1530,8 @@ mod tests {
     fn run(state: &mut LegacyState, ev: &TrackpadEvent, now: Instant) -> heapless::Vec<TrackpadReport, MAX_OUTPUTS> {
         let params = default_params();
         let mut out = heapless::Vec::new();
-        state.process(ev, &params, now, &mut out);
+        // Routed buttons = 0 — no keymap press in flight for these tests.
+        state.process(ev, &params, now, 0, &mut out);
         out
     }
 

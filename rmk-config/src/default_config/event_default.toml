@@ -13,6 +13,14 @@ channel_size = 8
 pubs = 1
 subs = 2
 
+# Keymap-driven mouse-button bitmap changes (MouseBtn1..8). Published by the
+# keyboard's mouse handler; consumed by trackpad processors that need to
+# surface button transitions on their own report stream (e.g. PTP).
+[event.mouse_buttons]
+channel_size = 4
+pubs = 1
+subs = 1
+
 [event.keyboard]
 channel_size = 16
 pubs = 2

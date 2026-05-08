@@ -98,6 +98,27 @@ pub struct ModifierEvent {
     pub modifier: ModifierCombination,
 }
 
+/// Mouse-button bitmap changed event. Published by the keyboard whenever
+/// keymap-driven mouse buttons (`MouseBtn1..8`) press or release. Bit 0 is
+/// `MouseBtn1` / left, etc. Mirrors the `buttons` field of the standard
+/// mouse HID report.
+///
+/// Subscribers (e.g. [`crate::input_device::trackpad_hid::TrackpadHidProcessor`])
+/// use it to surface button transitions even when no other input is in
+/// flight — without it, a `MouseBtn1` press whose destination is a
+/// trackpad's HID interface would only land on the next chip cycle, which
+/// for an event-mode IQS5xx with no finger present is "never".
+#[event(
+    channel_size = crate::MOUSE_BUTTONS_EVENT_CHANNEL_SIZE,
+    pubs = crate::MOUSE_BUTTONS_EVENT_PUB_SIZE,
+    subs = crate::MOUSE_BUTTONS_EVENT_SUB_SIZE
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct MouseButtonsEvent {
+    pub buttons: u8,
+}
+
 // ============================================================================
 // Pointing Device Events
 // ============================================================================

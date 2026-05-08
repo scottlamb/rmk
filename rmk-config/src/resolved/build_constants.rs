@@ -97,6 +97,7 @@ impl crate::KeyboardTomlConfig {
         let mut events = event_channels!(
             connection_status_change,
             modifier,
+            mouse_buttons,
             keyboard,
             layer_change,
             wpm_update,

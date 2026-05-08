@@ -21,7 +21,8 @@ use crate::core_traits::Runnable;
 #[cfg(all(feature = "split", feature = "_ble"))]
 use crate::event::ClearPeerEvent;
 use crate::event::{
-    ActionEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, SubscribableEvent, publish_event, publish_event_async,
+    ActionEvent, KeyboardEvent, KeyboardEventPos, ModifierEvent, MouseButtonsEvent, SubscribableEvent, publish_event,
+    publish_event_async,
 };
 use crate::hid::{KeyboardReport, Report};
 use crate::keyboard::combo::Combo;
@@ -1571,6 +1572,7 @@ impl<'a> Keyboard<'a> {
 
     /// Process mouse key action with acceleration support.
     async fn process_action_mouse(&mut self, key: HidKeyCode, event: KeyboardEvent) {
+        let buttons_before = self.mouse.report.buttons;
         let action = {
             let config = self.keymap.mouse_key_config();
             self.mouse.process(key, event.pressed, &config)
@@ -1578,6 +1580,17 @@ impl<'a> Keyboard<'a> {
 
         // Sync button state to keymap for conditional layer / fork consumers
         self.keymap.set_mouse_buttons(self.mouse.report.buttons);
+
+        // Surface button transitions on the dedicated event so trackpad
+        // processors that publish their own report stream (PTP) can mirror
+        // the bit even when no chip activity is in flight — without this,
+        // a routed `MouseBtn1` press with no finger on the trackpad would
+        // not surface a click on hosts using the trackpad interface.
+        if buttons_before != self.mouse.report.buttons {
+            publish_event(MouseButtonsEvent {
+                buttons: self.mouse.report.buttons,
+            });
+        }
 
         if let MouseAction::SendReport = action {
             self.send_mouse_report().await;
@@ -1592,8 +1605,12 @@ impl<'a> Keyboard<'a> {
             self.mouse.fire_repeats(&config)
         };
 
-        if let Some(report) = report {
+        if let Some(mut report) = report {
             self.keymap.set_mouse_buttons(self.mouse.report.buttons);
+            #[cfg(feature = "ptp")]
+            if crate::input_device::trackpad_hid::composite_should_suppress_mouse_buttons() {
+                report.buttons = 0;
+            }
             self.send_report(Report::MouseReport(report)).await;
             yield_now().await;
         }
@@ -1773,7 +1790,16 @@ impl<'a> Keyboard<'a> {
     /// Send mouse report. Rate is implicitly bounded by the repeat interval
     /// for movement/wheel, but button events are sent immediately.
     pub(crate) async fn send_mouse_report(&mut self) {
-        self.send_report(Report::MouseReport(self.mouse.get_report())).await;
+        let mut report = self.mouse.get_report();
+        // Suppress mouse buttons on the composite interface when the
+        // keyboard config has routed them to a trackpad interface — sending
+        // both would cause the host to coalesce successive clicks.
+        // Cursor movement (x/y/wheel/pan) always stays on composite.
+        #[cfg(feature = "ptp")]
+        if crate::input_device::trackpad_hid::composite_should_suppress_mouse_buttons() {
+            report.buttons = 0;
+        }
+        self.send_report(Report::MouseReport(report)).await;
         yield_now().await;
     }
 
