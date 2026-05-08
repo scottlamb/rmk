@@ -341,7 +341,7 @@ impl<D: Driver<'static>> Runnable for UsbTransport<D> {
             {
                 let logger_class = logger.take().expect("UsbTransport::run called twice");
                 let logger_fut = embassy_usb_logger::with_custom_style!(
-                    1024,
+                    32768,
                     log::LevelFilter::Debug,
                     logger_class,
                     |record, writer| {
