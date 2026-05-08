@@ -152,3 +152,97 @@ pub struct PointingSetCpiEvent {
     pub device_id: u8,
     pub cpi: u16,
 }
+
+// ============================================================================
+// Trackpad Events
+// ============================================================================
+
+/// Maximum number of simultaneous finger contacts in a `TrackpadEvent`. Five
+/// covers the IQS5xx family; trackpads supporting more would need this raised
+/// (and the split message budget reconsidered).
+pub const TRACKPAD_MAX_FINGERS: usize = 5;
+
+/// One finger's absolute state within a `TrackpadEvent`.
+#[derive(Serialize, Default, Deserialize, Clone, Debug, Copy, MaxSize)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TrackpadFinger {
+    /// Stable per-touch identity: source-supplied index that survives from
+    /// touch-down to lift, so consumers can map each finger to the same
+    /// contact across frames without doing frame-to-frame proximity matching.
+    /// For the IQS5xx this is the chip's 0..=4 slot index — that controller
+    /// keeps each finger pinned to its slot (other slots may sentinel out
+    /// independently), which means a finger that touches down in slot 2 stays
+    /// at id=2 until it lifts. Drivers without per-finger persistence should
+    /// still synthesise stable values here (e.g. by tracking previous-frame
+    /// matches themselves).
+    pub id: u8,
+    /// Absolute X position in chip-resolution units.
+    pub x: u16,
+    /// Absolute Y position in chip-resolution units.
+    pub y: u16,
+    /// Touch strength (capacitance-derived). Higher = firmer contact.
+    pub touch_strength: u16,
+    /// Touch area, in chip-channel units. Larger = bigger blob (e.g. palm).
+    pub area: u8,
+    /// True iff this contact is on the surface and being tracked. Mirrors
+    /// PTP's `tip_switch` bit. A `tip=false` record carries the contact's
+    /// last known position so a downstream consumer can drop the contact
+    /// from gesture state.
+    ///
+    /// Drivers for chips that natively expose a per-finger lift bit emit one
+    /// `tip=false` record on lift and then drop the id from subsequent
+    /// events. Drivers without that signal (e.g. IQS5xx in its single
+    /// strength=0/area=0 transitional cycle) only need to ensure the lift
+    /// is observable; a consumer that also tracks id-disappearance is
+    /// robust to either form.
+    pub tip: bool,
+    /// True if the source considers this contact a real finger versus a
+    /// rejected blob (palm, water, etc.). Maps directly to PTP's
+    /// `confidence` bit. Drivers that do palm rejection internally and
+    /// surface only accepted contacts (e.g. IQS5xx) always set this true.
+    pub confidence: bool,
+}
+
+/// Newtype wrapping `heapless::Vec<TrackpadFinger, TRACKPAD_MAX_FINGERS>`
+/// so we can supply postcard's `MaxSize` manually. The blanket `MaxSize` impl
+/// postcard ships is for `heapless` 0.7, but this crate uses 0.9 — different
+/// type, no impl. `Deref`/`DerefMut` mean callers see the inner `Vec`'s API
+/// unchanged (`.len()`, `.iter()`, `.push()`, indexing, etc.).
+#[derive(Serialize, Default, Deserialize, Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TrackpadFingers(pub heapless::Vec<TrackpadFinger, TRACKPAD_MAX_FINGERS>);
+
+impl MaxSize for TrackpadFingers {
+    // 1-byte length varint (TRACKPAD_MAX_FINGERS == 5 fits in one byte) plus
+    // up to TRACKPAD_MAX_FINGERS finger records.
+    const POSTCARD_MAX_SIZE: usize = 1 + TRACKPAD_MAX_FINGERS * <TrackpadFinger as MaxSize>::POSTCARD_MAX_SIZE;
+}
+
+impl core::ops::Deref for TrackpadFingers {
+    type Target = heapless::Vec<TrackpadFinger, TRACKPAD_MAX_FINGERS>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for TrackpadFingers {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// Raw output of one trackpad scan cycle, before software gesture
+/// interpretation. Drivers that read multi-touch frames publish this; a
+/// downstream processor turns it into `PointingEvent` (cursor / scroll) or
+/// a multi-finger PTP HID report.
+#[event(
+    channel_size = crate::TRACKPAD_EVENT_CHANNEL_SIZE,
+    pubs = crate::TRACKPAD_EVENT_PUB_SIZE,
+    subs = crate::TRACKPAD_EVENT_SUB_SIZE
+)]
+#[derive(Serialize, Default, Deserialize, Clone, Debug, MaxSize)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TrackpadEvent {
+    /// Per-finger absolute state. `fingers.len()` is the active finger count.
+    pub fingers: TrackpadFingers,
+}

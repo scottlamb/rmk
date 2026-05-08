@@ -59,6 +59,9 @@ events = [
     { name = "keyboard" },
     # split/peripheral.rs: PointingEvent::subscriber()
     { name = "pointing" },
+    # split/peripheral.rs: TrackpadEvent::subscriber() — peripheral pumps
+    # local TrackpadEvents over the split link as SplitMessage::Trackpad.
+    { name = "trackpad" },
     # split/driver.rs: LedIndicatorEvent::subscriber()
     { name = "led_indicator" },
     # split/driver.rs: LayerChangeEvent::subscriber()

@@ -69,11 +69,13 @@
 //!   scroll, zoom/pinch
 //! * raw per-channel count/delta data (§8.10.6)
 //!
-//! This driver currently requests only the 10-byte motion block at 0x000C
-//! (previous cycle time, gesture events, system info, number of fingers,
-//! relative XY) and publishes relative XY as cursor movement. Gestures are
-//! left disabled on the IC; absolute finger data and raw channel data are
-//! not read.
+//! This driver requests the 10-byte motion block at 0x000C (previous cycle
+//! time, gesture events, system info, number of fingers, relative XY)
+//! immediately followed by all five 7-byte per-finger records (§5.2.3-§5.2.5)
+//! and publishes a `TrackpadEvent` carrying just the per-finger absolute
+//! state. Chip-side gesture recognition and raw channel data are not used;
+//! gesture interpretation is intended to live in a downstream processor on
+//! the central side that consumes `TrackpadEvent`.
 //!
 //! # Configuration
 //!
@@ -95,14 +97,32 @@ use embedded_hal_async::digital::Wait;
 use embedded_hal_async::i2c::I2c;
 use rmk_macro::input_device;
 
-use crate::event::{AxisEvent, PointingEvent};
+use crate::event::{TRACKPAD_MAX_FINGERS, TrackpadEvent, TrackpadFinger, TrackpadFingers};
 use crate::fmt::Debug;
 
 const I2C_ADDR: u8 = 0x74; // default I2C bus address according to §8.2.
 
 const END_SESSION: [u8; 2] = [0xEE, 0xEE]; // §8.7. Address + dummy data byte; a zero-data write doesn't actually trigger end-of-comms.
 
-#[input_device(publish = PointingEvent)]
+/// Static (boot-time) configuration for an [`Iqs5xx`].
+///
+/// All three flags map 1:1 onto bits in the chip's `XY Config 0` register
+/// (§8.10.20, address `0x0669`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Iqs5xxConfig {
+    /// Set bit 0 (`FLIP_X`): mirror the X axis at the chip output.
+    pub invert_x: bool,
+    /// Set bit 1 (`FLIP_Y`): mirror the Y axis at the chip output.
+    pub invert_y: bool,
+    /// Set bit 2 (`SWITCH_XY_AXIS`): swap which physical electrode array
+    /// drives output X vs. Y. Used when the chip's Rx/Tx orientation is
+    /// rotated 90° from the user's expected X/Y. The driver also swaps
+    /// the X/Y resolution registers (§5.4) accordingly so the chip emits
+    /// coordinates spanning the right per-axis range.
+    pub swap_xy: bool,
+}
+
+#[input_device(publish = TrackpadEvent)]
 pub struct Iqs5xx<I, RDY>
 where
     I: I2c,
@@ -115,6 +135,8 @@ where
     i2c: I,
 
     window_detection: WindowDetection<RDY>,
+
+    config: Iqs5xxConfig,
 
     initialized: bool,
 }
@@ -180,7 +202,7 @@ where
     I::Error: Debug,
     RDY: Wait,
 {
-    pub fn new(rmk_id: u8, i2c: I, rdy: Option<RDY>) -> Self {
+    pub fn new(rmk_id: u8, i2c: I, rdy: Option<RDY>, config: Iqs5xxConfig) -> Self {
         Self {
             i2c,
             window_detection: match rdy {
@@ -190,6 +212,7 @@ where
                 },
                 Some(rdy) => WindowDetection::Rdy(rdy),
             },
+            config,
             initialized: false,
             pointing_device_id: rmk_id,
         }
@@ -221,11 +244,18 @@ where
             &mut [Operation::Write(&[0x06, 0x3D]), Operation::Read(&mut channels)],
         )
         .await?;
-        // §8.10.20: with SWITCH_XY_AXIS=0 (as set in `xy_config` below), Rx drives
-        // output X and Tx drives output Y. §5.1.1: max useful resolution per axis
-        // is (channels - 1) * 256.
-        let x_resolution = u16::from(channels[0].saturating_sub(1)) * 256;
-        let y_resolution = u16::from(channels[1].saturating_sub(1)) * 256;
+        // §8.10.20: with `SWITCH_XY_AXIS = 0`, Rx drives output X and Tx drives
+        // output Y; with `SWITCH_XY_AXIS = 1`, the assignments swap. §5.1.1: max
+        // useful resolution per axis is `(channels - 1) * 256`. The X/Y resolution
+        // registers always describe the *output* (post-swap) axes, so we have to
+        // pick the source array per output axis.
+        let (x_source, y_source) = if self.config.swap_xy {
+            (channels[1], channels[0])
+        } else {
+            (channels[0], channels[1])
+        };
+        let x_resolution = u16::from(x_source.saturating_sub(1)) * 256;
+        let y_resolution = u16::from(y_source.saturating_sub(1)) * 256;
 
         let i2c_timeout_ms;
         let active_interval_ms;
@@ -271,11 +301,12 @@ where
             0x31,        // System Control 0 at 0x0431; §8.10.7
             0b1000_0000, // ACK_RESET bit
         ];
-        #[rustfmt::skip]
-        const XY_CONFIG: [u8; 3] = [
-            0x06, 0x69, // XY Config 0 at 0x0669; §8.10.20
-            0b0001,     // FLIP_X | !SWITCH_XY_AXIS (Rx→X, Tx→Y; see resolution above)
-        ];
+        // XY Config 0 at 0x0669; §8.10.20. Bits 0/1/2 are FLIP_X/FLIP_Y/
+        // SWITCH_XY_AXIS, all driven from `Iqs5xxConfig`.
+        let xy_config_byte = (if self.config.invert_x { 0b001 } else { 0 })
+            | (if self.config.invert_y { 0b010 } else { 0 })
+            | (if self.config.swap_xy { 0b100 } else { 0 });
+        let xy_config = [0x06, 0x69, xy_config_byte];
         #[rustfmt::skip]
         let gestures = [
             0x06, 0xB7, // Single-/Multi-finger Gestures at 0x06B7/0x06B8; §8.10.21-§8.10.22
@@ -307,7 +338,7 @@ where
             ("config", &config[..]),
             ("report_rates", &report_rates[..]),
             ("ack_reset", &ACK_RESET[..]),
-            ("xy_config", &XY_CONFIG[..]),
+            ("xy_config", &xy_config[..]),
             ("gestures", &gestures[..]),
             ("xy_resolution", &xy_resolution[..]),
         ] {
@@ -327,18 +358,32 @@ where
         Ok(())
     }
 
-    async fn read_motion(&mut self) -> Result<PointingEvent, Error<I::Error>> {
-        // Motion block at 0x000C..0x0015 per table 8.1: previous cycle time
-        // (§4.1.1), gesture events 0/1 (§8.10.1-§8.10.2), system info 0/1
-        // (§8.10.3-§8.10.4), number of fingers (§5.2.1), relative XY (§5.2.2).
-        let mut data = [0u8; 10];
+    /// Reads one chip cycle's motion + per-finger block and packs it into a
+    /// `TrackpadEvent`.
+    async fn read_motion(&mut self) -> Result<TrackpadEvent, Error<I::Error>> {
+        // 10-byte base motion block at 0x000C..0x0015 (§ table 8.1: previous
+        // cycle time, gesture events 0/1, system info 0/1, number of fingers,
+        // relative XY) immediately followed by 5 × 7-byte per-finger absolute
+        // records starting at 0x0016 (§5.2.3-§5.2.5: X, Y, touch strength, area).
+        const BASE_LEN: usize = 10;
+        const PER_FINGER_LEN: usize = 7;
+        const TOTAL_LEN: usize = BASE_LEN + PER_FINGER_LEN * TRACKPAD_MAX_FINGERS;
+        let mut data = [0u8; TOTAL_LEN];
+
+        // One transaction: select the motion-block address, read all five
+        // slots, write END_SESSION. The chip pins each finger to its slot
+        // for the lifetime of the touch and sentinels out other slots
+        // independently, so reading only the slots indexed by the chip's
+        // `number_of_fingers` count loses every finger past the first
+        // sentinel (e.g. lifting finger 0 of {0,1,2} leaves slot 0 empty
+        // and live data in slots 1+2). Always reading all five lets the
+        // slot loop below locate live fingers wherever they sit.
+        //
+        // Address is re-selected every cycle rather than relying on the
+        // chip's "default read address" register: that register's
+        // persistence across resets is undocumented, so combining it
+        // with the watchdog is unsafe.
         let mut operations = [
-            // In theory, it's possible to skip the initial address selection
-            // write if the last window closed cleanly and RMK has previously
-            // set the "default read address" register. However, it's unclear
-            // if this register's contents are preserved across resets, so
-            // it's probably unwise to use this in combination with the watchdog.
-            // Let's be conservative and select the address each cycle.
             Operation::Write(&[0x00, 0x0C]),
             Operation::Read(&mut data),
             Operation::Write(&END_SESSION[..]),
@@ -357,14 +402,13 @@ where
                 *last_end = Instant::now();
             }
         }
+
         let prev_cycle_time_ms = data[0];
         let gesture_events_0 = data[1];
         let gesture_events_1 = data[2];
         let system_info_0 = data[3]; // §8.10.3
         let system_info_1 = data[4]; // §8.10.4
         let number_of_fingers = data[5];
-        let dx = i16::from_be_bytes(unwrap!(data[6..8].try_into()));
-        let dy = i16::from_be_bytes(unwrap!(data[8..10].try_into()));
 
         // §8.10.3: system_info_0.
         let charging_mode = match system_info_0 & 0b111 {
@@ -386,7 +430,7 @@ where
             return Err(Error::Reset);
         }
         debug!(
-            "iqs5xx {} motion data: cycle_ms={} gestures=[{},{}] mode={} system=[{},{}] n_fingers={} dx={} dy={}",
+            "iqs5xx {} motion data: cycle_ms={} gestures=[{},{}] mode={} system=[{},{}] n_fingers={}",
             self.pointing_device_id,
             prev_cycle_time_ms,
             gesture_events_0,
@@ -395,29 +439,58 @@ where
             system_info_0,
             system_info_1,
             number_of_fingers,
-            dx,
-            dy,
         );
-        Ok(PointingEvent([
-            AxisEvent {
-                typ: crate::event::AxisValType::Rel,
-                axis: crate::event::Axis::X,
-                value: dx,
-            },
-            AxisEvent {
-                typ: crate::event::AxisValType::Rel,
-                axis: crate::event::Axis::Y,
-                value: dy,
-            },
-            AxisEvent {
-                typ: crate::event::AxisValType::Rel,
-                axis: crate::event::Axis::Z,
-                value: 0,
-            },
-        ]))
+
+        // Decode the per-finger absolute records. The chip pins each
+        // finger to its slot for the lifetime of the touch, so the slot
+        // index is the contact's stable identity — preserve it as
+        // `TrackpadFinger::id`. Live fingers can sit at any slot
+        // independently (e.g. slot 0 just lifted while slot 2 is still
+        // touching), so the loop walks every slot.
+        //
+        // The chip uses two empty-slot encodings:
+        //
+        //   * `x == 0xFFFF` — the documented "no finger here" marker.
+        //     Steady-state empty slot. Skipped entirely; emits no record.
+        //
+        //   * `touch_strength == 0 && area == 0` with stale (x, y)
+        //     carried over from the touch's last live frame. The chip
+        //     emits this exactly once on lift, then transitions the slot
+        //     to 0xFFFF on subsequent cycles. We forward it as a
+        //     `tip = false` record so downstream consumers see the lift
+        //     transition explicitly with the contact's last known
+        //     position — matching PTP's one-shot `tip_switch = 0`
+        //     semantics.
+        let mut fingers = TrackpadFingers::default();
+        for slot in 0..TRACKPAD_MAX_FINGERS {
+            let off = BASE_LEN + slot * PER_FINGER_LEN;
+            let x = u16::from_be_bytes(unwrap!(data[off..off + 2].try_into()));
+            if x == 0xFFFF {
+                continue;
+            }
+            let y = u16::from_be_bytes(unwrap!(data[off + 2..off + 4].try_into()));
+            let touch_strength = u16::from_be_bytes(unwrap!(data[off + 4..off + 6].try_into()));
+            let area = data[off + 6];
+            let tip = !(touch_strength == 0 && area == 0);
+            let f = TrackpadFinger {
+                id: slot as u8,
+                x,
+                y,
+                touch_strength,
+                area,
+                tip,
+                // Always set confidence; palms on the trackpad are not a
+                // problem with the typical keyboard mounting.
+                confidence: true,
+            };
+            // push can't overflow: capacity is TRACKPAD_MAX_FINGERS.
+            let _ = fingers.push(f);
+        }
+
+        Ok(TrackpadEvent { fingers })
     }
 
-    async fn read_pointing_event(&mut self) -> PointingEvent {
+    async fn read_trackpad_event(&mut self) -> TrackpadEvent {
         loop {
             // Check initialization status on each iteration because the device
             // can reset and require re-initialization.
@@ -432,11 +505,7 @@ where
                 continue;
             }
             match self.read_motion().await {
-                Ok(e) => {
-                    if e.0.iter().any(|axis| axis.value != 0) {
-                        return e;
-                    }
-                }
+                Ok(e) => return e,
                 Err(e) => {
                     error!("iqs5xx {} failure: {:?}", self.pointing_device_id, e);
                     Timer::after_millis(5).await;

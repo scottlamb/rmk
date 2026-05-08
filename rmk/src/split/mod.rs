@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "_ble")]
 use crate::event::BatteryStatusEvent;
 use crate::event::{KeyboardEvent, PointingEvent};
+#[cfg(not(feature = "_ble"))]
+use crate::event::TrackpadEvent;
 
 #[cfg(feature = "_ble")]
 pub mod ble;
@@ -22,13 +24,26 @@ pub const SPLIT_MESSAGE_MAX_SIZE: usize = SplitMessage::POSTCARD_MAX_SIZE + 4;
 
 /// Message used from central & peripheral communication
 #[repr(u8)]
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, MaxSize)]
+// `Copy` is dropped: `Trackpad(TrackpadEvent)` carries a `heapless::Vec`
+// inside `TrackpadFingers`, which isn't Copy. All call sites take
+// `&SplitMessage` or move ownership explicitly.
+#[derive(Serialize, Deserialize, Debug, Clone, MaxSize)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub(crate) enum SplitMessage {
     /// Keyboard event, from peripheral to central
     Key(KeyboardEvent),
     /// Pointing device event, from peripheral to central
     Pointing(PointingEvent),
+    /// Multi-touch trackpad scan-cycle event, from peripheral to central.
+    /// Carries per-finger absolute positions for the central's
+    /// `TrackpadHidProcessor` to translate into HID reports.
+    ///
+    /// Gated on `not(_ble)`: the BLE split path's GATT service generates
+    /// a `[u8; SPLIT_MESSAGE_MAX_SIZE]::default()` call that only works
+    /// for arrays up to 32 bytes, and a 5-finger trackpad event pushes
+    /// the message past that. BLE-paired trackpads are a follow-up.
+    #[cfg(not(feature = "_ble"))]
+    Trackpad(TrackpadEvent),
     /// Led state, on/off, from central to peripheral
     LedState(bool),
     /// `ConnectionStatus` snapshot of the central.

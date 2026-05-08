@@ -61,6 +61,13 @@ channel_size = 8
 pubs = 2
 subs = 2
 
+# Raw trackpad events (per-cycle multi-touch frame; consumed by gesture
+# processors that emit PointingEvent downstream).
+[event.trackpad]
+channel_size = 4
+pubs = 2
+subs = 2
+
 # Split events
 [event.peripheral_connected]
 channel_size = 1

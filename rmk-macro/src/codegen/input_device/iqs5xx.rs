@@ -5,7 +5,13 @@ use rmk_config::resolved::hardware::{ChipModel, ChipSeries, Iqs5xxConfig};
 use super::Initializer;
 
 /// Expand IQS5xx device configuration.
-/// Returns (device initializers, processor initializers).
+///
+/// Returns (device initializers, processor initializers). The processor list
+/// is currently always empty: the driver publishes `TrackpadEvent` and the
+/// matching consumer (which translates to `PointingEvent` / a HID report)
+/// has not landed yet, so this codegen wires up only the device. Users who
+/// want a working pointer in the meantime can add a consumer in their app
+/// layer.
 pub(crate) fn expand_iqs5xx_device(
     iqs5xx_config: Vec<Iqs5xxConfig>,
     chip: &ChipModel,
@@ -22,7 +28,6 @@ pub(crate) fn expand_iqs5xx_device(
     }
 
     let mut device_initializers = vec![];
-    let mut processor_initializers = vec![];
 
     for (idx, sensor) in iqs5xx_config.iter().enumerate() {
         let sensor_id = sensor.id.unwrap_or(0);
@@ -35,16 +40,22 @@ pub(crate) fn expand_iqs5xx_device(
         let device_ident = format_ident!("{}_device", sensor_name);
         let i2c_ident = format_ident!("{}_i2c", sensor_name);
         let rdy_ident = format_ident!("{}_rdy", sensor_name);
-        let processor_ident = format_ident!("{}_processor", sensor_name);
-        let processor_ident_config = format_ident!("{}_config", processor_ident);
+        let cfg_ident = format_ident!("{}_config", sensor_name);
 
         let instance_ident = format_ident!("{}", sensor.i2c.instance.to_uppercase());
         let sda_ident = format_ident!("{}", sensor.i2c.sda);
         let scl_ident = format_ident!("{}", sensor.i2c.scl);
 
-        let proc_invert_x = sensor.proc_invert_x;
-        let proc_invert_y = sensor.proc_invert_y;
-        let proc_swap_xy = sensor.proc_swap_xy;
+        let invert_x = sensor.invert_x;
+        let invert_y = sensor.invert_y;
+        let swap_xy = sensor.swap_xy;
+        let cfg_init = quote! {
+            let #cfg_ident = ::rmk::input_device::iqs5xx::Iqs5xxConfig {
+                invert_x: #invert_x,
+                invert_y: #invert_y,
+                swap_xy: #swap_xy,
+            };
+        };
 
         let rdy_init = match (&sensor.rdy, &chip.series) {
             (Some(rdy_pin), ChipSeries::Nrf52) => {
@@ -76,6 +87,7 @@ pub(crate) fn expand_iqs5xx_device(
 
         let device_init = match chip.series {
             ChipSeries::Nrf52 => quote! {
+                #cfg_init
                 #rdy_init
                 static #i2c_ident: ::static_cell::StaticCell<[u8; 16]> = ::static_cell::StaticCell::new();
                 let #i2c_ident = #i2c_ident.init([0u8; 16]);
@@ -91,9 +103,11 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
+                    #cfg_ident,
                 );
             },
             ChipSeries::Rp2040 => quote! {
+                #cfg_init
                 #rdy_init
                 let #i2c_ident = ::embassy_rp::i2c::I2c::new_async(
                     p.#instance_ident,
@@ -106,6 +120,7 @@ pub(crate) fn expand_iqs5xx_device(
                     #sensor_id,
                     #i2c_ident,
                     #rdy_ident,
+                    #cfg_ident,
                 );
             },
             _ => unreachable!(),
@@ -115,26 +130,9 @@ pub(crate) fn expand_iqs5xx_device(
             initializer: device_init,
             var_name: device_ident,
         });
-
-        let processor_init = quote! {
-            let #processor_ident_config = ::rmk::input_device::pointing::PointingProcessorConfig {
-                invert_x: #proc_invert_x,
-                invert_y: #proc_invert_y,
-                swap_xy: #proc_swap_xy,
-            };
-            let mut #processor_ident = ::rmk::input_device::pointing::PointingProcessor::new(
-                &keymap,
-                #processor_ident_config,
-            );
-        };
-
-        processor_initializers.push(Initializer {
-            initializer: processor_init,
-            var_name: processor_ident,
-        });
     }
 
-    (device_initializers, processor_initializers)
+    (device_initializers, Vec::new())
 }
 
 /// Generate `bind_interrupts!` entries for the I²C peripherals used by IQS5xx

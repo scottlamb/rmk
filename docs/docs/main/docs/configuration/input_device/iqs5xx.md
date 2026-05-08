@@ -45,10 +45,11 @@ i2c.scl = "PIN_5"
 # Optional: RDY (data-ready) pin. Strongly recommended.
 rdy = "PIN_15"
 
-# Axis tweaks applied in PointingProcessor.
-# proc_invert_x = true
-# proc_invert_y = true
-# proc_swap_xy = true
+# Axis tweaks applied on-chip.Set whichever of these your physical mounting
+# needs; defaults are all false.
+# invert_x = true
+# invert_y = true
+# swap_xy = true
 ```
 
 ### Split

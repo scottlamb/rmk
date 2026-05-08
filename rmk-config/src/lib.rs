@@ -388,6 +388,7 @@ define_event_config!(
     charging_state,
     // Pointing device events
     pointing,
+    trackpad,
     // Split events
     peripheral_connected,
     central_connected,
@@ -975,15 +976,17 @@ pub struct Iqs5xxConfig {
     /// Optional `RDY` pin. Strongly recommended; without it the driver falls
     /// back to timed polling and may stall the bus through clock-stretching.
     pub rdy: Option<String>,
-    /// Invert X in the PointingProcessor.
+    /// Mirror the X axis on-chip (`XY Config 0` bit `FLIP_X`, §8.10.20).
     #[serde(default)]
-    pub proc_invert_x: bool,
-    /// Invert Y in the PointingProcessor.
+    pub invert_x: bool,
+    /// Mirror the Y axis on-chip (`XY Config 0` bit `FLIP_Y`).
     #[serde(default)]
-    pub proc_invert_y: bool,
-    /// Swap X and Y in the PointingProcessor.
+    pub invert_y: bool,
+    /// Swap X and Y on-chip (`XY Config 0` bit `SWITCH_XY_AXIS`); the
+    /// driver also swaps the X/Y resolution registers (§5.4) so per-axis
+    /// ranges match the post-swap output.
     #[serde(default)]
-    pub proc_swap_xy: bool,
+    pub swap_xy: bool,
 }
 
 /// I²C bus configuration for the IQS5xx. Distinct from the generic `I2cConfig`

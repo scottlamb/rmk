@@ -173,6 +173,8 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
             },
             // Non-key events are drop-on-full to keep the split read loop responsive.
             SplitMessage::Pointing(e) => publish_event(e),
+            #[cfg(not(feature = "_ble"))]
+            SplitMessage::Trackpad(e) => publish_event(e),
             #[cfg(feature = "_ble")]
             SplitMessage::BatteryStatus(state) => {
                 use crate::event::PeripheralBatteryEvent;

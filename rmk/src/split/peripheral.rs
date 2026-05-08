@@ -16,7 +16,7 @@ use {
 use super::SplitMessage;
 use super::driver::{SplitReader, SplitWriter};
 use crate::event::{
-    KeyboardEvent, LayerChangeEvent, LedIndicatorEvent, PointingEvent, SubscribableEvent, publish_event,
+    KeyboardEvent, LayerChangeEvent, LedIndicatorEvent, PointingEvent, SubscribableEvent, TrackpadEvent, publish_event,
 };
 #[cfg(feature = "display")]
 use crate::event::{ModifierEvent, SleepStateEvent, WpmUpdateEvent};
@@ -62,6 +62,26 @@ pub(crate) struct SplitPeripheral<S: SplitWriter + SplitReader> {
     split_driver: S,
 }
 
+/// Build the next peripheral→central trackpad split message. The
+/// `Trackpad` variant of `SplitMessage` only exists on `not(_ble)`
+/// (see `split/mod.rs` for why), so on `_ble` we never resolve a
+/// SplitMessage and the `select_biased!` arm is effectively dead. The
+/// peripheral still runs the trackpad subscriber unconditionally so
+/// the rest of the pipeline (compile-time wiring, local consumers in a
+/// future commit) doesn't need an extra cfg gate.
+#[cfg(not(feature = "_ble"))]
+async fn next_trackpad_split_msg<E: crate::event::EventSubscriber<Event = TrackpadEvent>>(
+    sub: &mut E,
+) -> SplitMessage {
+    SplitMessage::Trackpad(sub.next_event().await)
+}
+#[cfg(feature = "_ble")]
+async fn next_trackpad_split_msg<E: crate::event::EventSubscriber<Event = TrackpadEvent>>(
+    _sub: &mut E,
+) -> SplitMessage {
+    core::future::pending::<SplitMessage>().await
+}
+
 impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
     pub(crate) fn new(split_driver: S) -> Self {
         Self { split_driver }
@@ -76,6 +96,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
         #[cfg(feature = "_ble")]
         let mut charging_state_sub = ChargingStateEvent::subscriber();
         let mut pointing_sub = PointingEvent::subscriber();
+        let mut trackpad_sub = TrackpadEvent::subscriber();
         #[cfg(feature = "_ble")]
         let mut battery_sub = BatteryStatusEvent::subscriber();
 
@@ -90,6 +111,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                         }.into())
                     },
                     e = pointing_sub.next_message_pure().fuse() => SplitMessage::Pointing(e),
+                    msg = next_trackpad_split_msg(&mut trackpad_sub).fuse() => msg,
                     with_feature("_ble"): e = battery_sub.next_event().fuse() => SplitMessage::BatteryStatus(e),
                 }
             };
