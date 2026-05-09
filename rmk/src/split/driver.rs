@@ -1,10 +1,28 @@
 //! The abstracted driver layer of the split keyboard.
 //!
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
+#[cfg(not(feature = "_ble"))]
+use embassy_time::Instant;
+use embassy_time::Timer;
 use futures::FutureExt;
 
 use super::SplitMessage;
+#[cfg(not(feature = "_ble"))]
+use crate::event::PeripheralConnectedEvent;
 use crate::event::{KeyboardEvent, KeyboardEventPos, SubscribableEvent, publish_event, publish_event_async};
+
+/// Peripheral→central liveness ping interval, ms. The peripheral emits
+/// a `SplitMessage::Heartbeat` every interval; the central treats the
+/// peripheral as gone if no message of any kind has arrived in
+/// [`HEARTBEAT_TIMEOUT_MS`].
+#[cfg(not(feature = "_ble"))]
+pub(crate) const HEARTBEAT_INTERVAL_MS: u64 = 1000;
+
+/// Silence threshold before the central declares the peripheral
+/// disconnected. 3× [`HEARTBEAT_INTERVAL_MS`] tolerates one missed ping
+/// without flapping.
+#[cfg(not(feature = "_ble"))]
+const HEARTBEAT_TIMEOUT_MS: u64 = 3 * HEARTBEAT_INTERVAL_MS;
 
 /// Build the next central→peripheral lighting frame. The
 /// `select_biased_with_feature!` arm in `run_central_link` always pulls
@@ -91,6 +109,18 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
     pub(crate) async fn run(mut self) {
         use crate::event::EventSubscriber;
 
+        // Heartbeat-based connection tracking. `last_rx` is set on every
+        // successful read; on the first read after boot (or after a
+        // detected drop) the manager publishes
+        // `PeripheralConnectedEvent { connected: true }`. After
+        // `HEARTBEAT_TIMEOUT_MS` of silence the inverse fires. BLE has
+        // its own connection-state plumbing in `split/ble/central.rs`,
+        // so this state is `cfg`-gated to the serial path.
+        #[cfg(not(feature = "_ble"))]
+        let mut last_rx: Option<Instant> = None;
+        #[cfg(not(feature = "_ble"))]
+        let mut connected = false;
+
         let mut indicator_sub = crate::event::LedIndicatorEvent::subscriber();
         let mut layer_sub = crate::event::LayerChangeEvent::subscriber();
         // Subscribe before the initial send so any change racing past the
@@ -119,6 +149,10 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
         }
 
         loop {
+            // Wake up at least once per second so the heartbeat-timeout
+            // check below stays responsive.
+            let wait_time: u64 = 1000;
+
             // Use select_biased_with_feature to handle feature-gated subscriber arms
             let next_event_to_peri = async {
                 crate::select_biased_with_feature! {
@@ -146,18 +180,48 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
                 }
             };
 
-            match select(self.transceiver.read(), next_event_to_peri).await {
-                Either::First(read_result) => match read_result {
+            match select3(
+                self.transceiver.read(),
+                next_event_to_peri,
+                Timer::after_millis(wait_time),
+            )
+            .await
+            {
+                Either3::First(read_result) => match read_result {
                     Ok(split_message) => {
+                        #[cfg(not(feature = "_ble"))]
+                        {
+                            last_rx = Some(Instant::now());
+                            if !connected {
+                                connected = true;
+                                publish_event(PeripheralConnectedEvent {
+                                    id: self.id,
+                                    connected: true,
+                                });
+                            }
+                        }
                         self.process_peripheral_message(split_message).await;
                     }
                     Err(e) => {
                         error!("Peripheral message read error: {:?}", e);
                     }
                 },
-                Either::Second(msg) => {
+                Either3::Second(msg) => {
                     if self.send(&msg).await.is_err() {
                         return;
+                    }
+                }
+                Either3::Third(_) => {
+                    #[cfg(not(feature = "_ble"))]
+                    if connected
+                        && last_rx
+                            .is_some_and(|t| t.elapsed().as_millis() >= HEARTBEAT_TIMEOUT_MS)
+                    {
+                        connected = false;
+                        publish_event(PeripheralConnectedEvent {
+                            id: self.id,
+                            connected: false,
+                        });
                     }
                 }
             }
@@ -192,6 +256,11 @@ impl<const ROW: usize, const COL: usize, const ROW_OFFSET: usize, const COL_OFFS
             SplitMessage::Pointing(e) => publish_event(e),
             #[cfg(not(feature = "_ble"))]
             SplitMessage::Trackpad(e) => publish_event(e),
+            #[cfg(not(feature = "_ble"))]
+            SplitMessage::Heartbeat => {
+                // No payload, no follow-up work — `last_rx` was already
+                // updated at the read site, which is all this message carries.
+            }
             #[cfg(feature = "_ble")]
             SplitMessage::BatteryStatus(state) => {
                 use crate::event::PeripheralBatteryEvent;

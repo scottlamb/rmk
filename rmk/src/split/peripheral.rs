@@ -82,6 +82,25 @@ async fn next_trackpad_split_msg<E: crate::event::EventSubscriber<Event = Trackp
     core::future::pending::<SplitMessage>().await
 }
 
+/// Liveness ping for the serial split. Returns a `Heartbeat` message
+/// once per [`HEARTBEAT_INTERVAL_MS`](crate::split::driver::HEARTBEAT_INTERVAL_MS).
+/// Re-created on every run-loop iteration, so the next firing schedules
+/// from the moment the previous one was sent.
+///
+/// On the BLE split the connection state is already exposed by
+/// [`PeripheralConnectedEvent`](crate::event::PeripheralConnectedEvent)
+/// at the GATT layer, and `SplitMessage::Heartbeat` doesn't exist on
+/// that build, so this returns a never-resolving future.
+#[cfg(not(feature = "_ble"))]
+async fn next_heartbeat_split_msg() -> SplitMessage {
+    embassy_time::Timer::after_millis(crate::split::driver::HEARTBEAT_INTERVAL_MS).await;
+    SplitMessage::Heartbeat
+}
+#[cfg(feature = "_ble")]
+async fn next_heartbeat_split_msg() -> SplitMessage {
+    core::future::pending::<SplitMessage>().await
+}
+
 impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
     pub(crate) fn new(split_driver: S) -> Self {
         Self { split_driver }
@@ -112,6 +131,7 @@ impl<S: SplitWriter + SplitReader> SplitPeripheral<S> {
                     },
                     e = pointing_sub.next_message_pure().fuse() => SplitMessage::Pointing(e),
                     msg = next_trackpad_split_msg(&mut trackpad_sub).fuse() => msg,
+                    msg = next_heartbeat_split_msg().fuse() => msg,
                     with_feature("_ble"): e = battery_sub.next_event().fuse() => SplitMessage::BatteryStatus(e),
                 }
             };

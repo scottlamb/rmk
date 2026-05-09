@@ -112,6 +112,15 @@ pub(crate) enum SplitMessage {
     /// Battery status, from peripheral to central
     #[cfg(feature = "_ble")]
     BatteryStatus(BatteryStatusEvent),
+    /// Liveness ping, peripheral to central. Sent on a fixed interval
+    /// (see `split::peripheral`) so the serial-split central can detect
+    /// when the peripheral has gone away — without it there is no
+    /// idle traffic and "no recent message" is indistinguishable from
+    /// "unplugged". The variant carries no payload; arrival is the
+    /// signal. The BLE split has its own connection state and does
+    /// not generate or rely on this.
+    #[cfg(not(feature = "_ble"))]
+    Heartbeat,
     /// Per-LED RGB frame for the peripheral's strip, central to peripheral.
     /// Bytes are semantic RGB triples (`[r0, g0, b0, r1, g1, b1, …]`);
     /// the peripheral's WS2812 driver handles wire-format ordering
